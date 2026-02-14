@@ -79,6 +79,27 @@ CONFIG = {
     "plot_path_val": "parity_val.png",
     "plot_path_test": "parity_test.png",
     "training_history_path": "training_history.png",
+
+    # -----------------------------------------------------------------
+    # Inverse Model — Optuna HPO settings
+    # -----------------------------------------------------------------
+    "inverse_optuna_trials": 50,
+    "inverse_optuna_timeout_sec": None,
+    "inverse_optuna_seed": 42,
+    "inverse_optuna_pruner": "median",
+    "inverse_optuna_startup_trials": 10,
+    "inverse_optuna_warmup_steps": 10,
+    "inverse_optuna_study_name": "inverse_mlp_hpo",
+    "inverse_optuna_db": None,
+
+    # Tuning epoch budget (per trial)
+    "inverse_tune_max_epochs": 400,
+    "inverse_tune_early_stop_patience": 60,
+    "inverse_tune_early_stop_min_delta": 1e-7,
+
+    # Output paths for inverse HPO
+    "inverse_optuna_results_csv": "inverse_optuna_trials.csv",
+    "inverse_best_params_json": "inverse_optuna_best_params.json",
 }
 
 # =============================================================================
