@@ -18,6 +18,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import mean_absolute_error
 from copy import deepcopy
+from pathlib import Path
 
 try:
     import optuna
@@ -215,9 +216,13 @@ def run_optuna_hpo(data: dict, config: dict, device: torch.device) -> dict:
     print(f"  params: {study.best_params}")
 
     # Save trials table
+    output_dir = Path(config["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    trials_csv = str(output_dir / config["optuna_results_csv"])
     trials_df = study.trials_dataframe()
-    trials_df.to_csv(str(config["optuna_results_csv"]), index=False)
-    print(f"Saved Optuna trials: {config['optuna_results_csv']}")
+    trials_df.to_csv(trials_csv, index=False)
+    print(f"Saved Optuna trials: {trials_csv}")
 
     # Save best params with reconstructed hidden_layers for easy loading
     best_params = study.best_params.copy()
@@ -239,9 +244,10 @@ def run_optuna_hpo(data: dict, config: dict, device: torch.device) -> dict:
         "best_params": best_params,
     }
 
-    with open(str(config["best_params_json"]), "w") as f:
+    params_path = str(output_dir / config["best_params_json"])
+    with open(params_path, "w") as f:
         json.dump(output, f, indent=2)
-    print(f"Saved best params: {config['best_params_json']}")
+    print(f"Saved best params: {params_path}")
 
     return output
 
@@ -262,12 +268,15 @@ def main():
 
     hpo_result = run_optuna_hpo(data, CONFIG, device)
 
+    output_dir = Path(CONFIG["output_dir"])
+    params_path = output_dir / CONFIG["best_params_json"]
+
     print("\n" + "=" * 60)
     print("TUNING COMPLETE")
     print("=" * 60)
-    print(f"\nBest parameters saved to: {CONFIG['best_params_json']}")
+    print(f"\nBest parameters saved to: {params_path}")
     print("\nTo train with these parameters, run:")
-    print(f"  python train_model.py --params {CONFIG['best_params_json']}")
+    print(f"  python train_model.py --params {params_path}")
 
 
 if __name__ == "__main__":
