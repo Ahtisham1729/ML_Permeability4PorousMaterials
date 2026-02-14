@@ -11,6 +11,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
+from copy import deepcopy
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
@@ -54,6 +55,7 @@ CONFIG = {
     "scheduler_patience": 15,
     "early_stop_patience": 100,
     "early_stop_min_delta": 1e-8,
+    "max_grad_norm": 1.0,
 
     # Optuna HPO settings (used by tune_hyperparams.py)
     "optuna_trials": 50,
@@ -235,15 +237,17 @@ def load_and_preprocess_data(config: dict) -> dict:
     }
 
 
-def make_loaders(data: dict, batch_size: int) -> dict:
-    """Create train/val loaders from cached tensors."""
+def make_loaders(data: dict, batch_size: int, seed: int = 42) -> dict:
+    """Create train/val loaders from cached tensors with a seeded generator."""
+    g = torch.Generator()
+    g.manual_seed(seed)
     train_loader = DataLoader(
         TensorDataset(data["X_train_t"], data["Y_train_t"]),
-        batch_size=batch_size, shuffle=True, drop_last=False
+        batch_size=batch_size, shuffle=True, drop_last=False, generator=g,
     )
     val_loader = DataLoader(
         TensorDataset(data["X_val_t"], data["Y_val_t"]),
-        batch_size=batch_size, shuffle=False, drop_last=False
+        batch_size=batch_size, shuffle=False, drop_last=False,
     )
     return {"train_loader": train_loader, "val_loader": val_loader}
 
@@ -274,3 +278,97 @@ class PermeabilityMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.network(x)
+
+
+# =============================================================================
+# Early Stopping
+# =============================================================================
+
+class EarlyStopping:
+    """Early stopping on validation loss; stores best weights."""
+    def __init__(self, patience: int, min_delta: float = 0.0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float("inf")
+        self.best_weights = None
+        self.counter = 0
+
+    def __call__(self, val_loss: float, model: nn.Module) -> bool:
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.best_weights = deepcopy(model.state_dict())
+            self.counter = 0
+            return False
+        self.counter += 1
+        return self.counter >= self.patience
+
+    def restore_best(self, model: nn.Module):
+        if self.best_weights is not None:
+            model.load_state_dict(self.best_weights)
+
+
+# =============================================================================
+# Training Utilities
+# =============================================================================
+
+def train_one_epoch(model, loader, criterion, optimizer, device,
+                    max_grad_norm: float = 0.0) -> float:
+    """Single training epoch. Applies gradient clipping if max_grad_norm > 0."""
+    model.train()
+    total, n = 0.0, 0
+    for xb, yb in loader:
+        xb, yb = xb.to(device), yb.to(device)
+        optimizer.zero_grad(set_to_none=True)
+        pred = model(xb)
+        loss = criterion(pred, yb)
+        loss.backward()
+        if max_grad_norm > 0:
+            nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        optimizer.step()
+        total += float(loss.item())
+        n += 1
+    return total / max(n, 1)
+
+
+@torch.no_grad()
+def validate(model, loader, criterion, device) -> float:
+    model.eval()
+    total, n = 0.0, 0
+    for xb, yb in loader:
+        xb, yb = xb.to(device), yb.to(device)
+        pred = model(xb)
+        loss = criterion(pred, yb)
+        total += float(loss.item())
+        n += 1
+    return total / max(n, 1)
+
+
+# =============================================================================
+# Scaler Serialization
+# =============================================================================
+
+def save_scaler(scaler: MinMaxScaler) -> dict:
+    """Serialize a MinMaxScaler to a plain dict of numpy arrays."""
+    return {
+        "data_min_": scaler.data_min_.tolist(),
+        "data_max_": scaler.data_max_.tolist(),
+        "data_range_": scaler.data_range_.tolist(),
+        "scale_": scaler.scale_.tolist(),
+        "min_": scaler.min_.tolist(),
+        "feature_range": list(scaler.feature_range),
+        "n_features_in_": int(scaler.n_features_in_),
+        "n_samples_seen_": int(scaler.n_samples_seen_),
+    }
+
+
+def load_scaler(d: dict) -> MinMaxScaler:
+    """Reconstruct a MinMaxScaler from a plain dict."""
+    scaler = MinMaxScaler(feature_range=tuple(d["feature_range"]))
+    scaler.data_min_ = np.array(d["data_min_"], dtype=np.float64)
+    scaler.data_max_ = np.array(d["data_max_"], dtype=np.float64)
+    scaler.data_range_ = np.array(d["data_range_"], dtype=np.float64)
+    scaler.scale_ = np.array(d["scale_"], dtype=np.float64)
+    scaler.min_ = np.array(d["min_"], dtype=np.float64)
+    scaler.n_features_in_ = int(d["n_features_in_"])
+    scaler.n_samples_seen_ = int(d["n_samples_seen_"])
+    return scaler

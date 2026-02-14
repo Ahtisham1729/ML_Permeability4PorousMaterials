@@ -63,7 +63,10 @@ except ImportError:
     optuna = None  # Only required when --tune is used
 
 # Import from your existing forward model infrastructure
-from model_config import CONFIG, set_seed, load_and_preprocess_data, PermeabilityMLP
+from model_config import (
+    CONFIG, set_seed, load_and_preprocess_data, PermeabilityMLP,
+    EarlyStopping, save_scaler, load_scaler,
+)
 
 
 # =============================================================================
@@ -149,34 +152,6 @@ def bounding_loss(theta_pred: torch.Tensor,
 
 
 # =============================================================================
-# Early Stopping
-# =============================================================================
-
-class EarlyStopping:
-    """Early stopping on validation loss; stores best weights."""
-
-    def __init__(self, patience: int, min_delta: float = 0.0):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.best_loss = float("inf")
-        self.best_weights = None
-        self.counter = 0
-
-    def __call__(self, val_loss: float, model: nn.Module) -> bool:
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
-            self.best_weights = deepcopy(model.state_dict())
-            self.counter = 0
-            return False
-        self.counter += 1
-        return self.counter >= self.patience
-
-    def restore_best(self, model: nn.Module):
-        if self.best_weights is not None:
-            model.load_state_dict(self.best_weights)
-
-
-# =============================================================================
 # Configuration
 # =============================================================================
 
@@ -202,6 +177,7 @@ INVERSE_CONFIG = {
     # Early stopping
     "early_stop_patience": 100,
     "early_stop_min_delta": 1e-8,
+    "max_grad_norm": 1.0,
 
     # Loss mode: "geometry", "bounding", or "fwd_only"
     "loss_mode": "geometry",
@@ -234,10 +210,10 @@ def prepare_inverse_data(forward_checkpoint_path: str, device: torch.device):
     print("=" * 60)
 
     # Load forward checkpoint
-    checkpoint = torch.load(forward_checkpoint_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(forward_checkpoint_path, map_location=device, weights_only=True)
     fwd_config = checkpoint["config"]
-    scaler_X = checkpoint["scaler_X"]
-    scaler_Y = checkpoint["scaler_Y"]
+    scaler_X = load_scaler(checkpoint["scaler_X"])
+    scaler_Y = load_scaler(checkpoint["scaler_Y"])
 
     print(f"Forward config loaded from checkpoint")
     print(f"  Features ({len(fwd_config['feature_cols'])}): {fwd_config['feature_cols']}")
@@ -453,6 +429,7 @@ def run_inverse_optuna_hpo(prep: dict, inv_config: dict, config: dict,
         )
 
         best_metric = float("inf")
+        hpo_max_grad_norm = float(inv_config.get("max_grad_norm", 0.0))
 
         for epoch in range(1, tune_max_epochs + 1):
             # --- Train ---
@@ -473,6 +450,8 @@ def run_inverse_optuna_hpo(prep: dict, inv_config: dict, config: dict,
                     loss = w_fwd * loss_fwd
 
                 loss.backward()
+                if hpo_max_grad_norm > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), hpo_max_grad_norm)
                 optimizer.step()
 
             # --- Validate (forward consistency MSE on val set) ---
@@ -621,9 +600,12 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
     theta_min_b = prep["theta_min"] - margin * theta_range
     theta_max_b = prep["theta_max"] + margin * theta_range
 
-    # DataLoader
+    # DataLoader (seeded for reproducibility)
+    g = torch.Generator()
+    g.manual_seed(int(CONFIG.get("random_state", 42)))
     dataset = TensorDataset(k_train, theta_train)
-    loader = DataLoader(dataset, batch_size=inv_config["batch_size"], shuffle=True)
+    loader = DataLoader(dataset, batch_size=inv_config["batch_size"], shuffle=True,
+                        generator=g)
 
     # Build inverse model
     inverse_model = InverseMLP(
@@ -634,7 +616,7 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
     ).to(device)
 
     if resume_path:
-        state = torch.load(resume_path, map_location=device, weights_only=False)
+        state = torch.load(resume_path, map_location=device, weights_only=True)
         sd = state if isinstance(state, dict) and "model_state_dict" not in state else state.get("model_state_dict", state)
         clean = OrderedDict()
         for k, v in sd.items():
@@ -684,8 +666,9 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
         min_delta=inv_config["early_stop_min_delta"],
     )
 
+    max_grad_norm = float(inv_config.get("max_grad_norm", 0.0))
     history = {
-        "train_fwd": [], "val_fwd": [], "test_fwd": [],
+        "train_fwd": [], "val_fwd": [],
         "train_reg": [], "val_reg": [],
         "train_total": [], "val_total": [],
         "lr": [],
@@ -716,9 +699,11 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
                 loss = w_fwd * loss_fwd
 
             loss.backward()
+            if max_grad_norm > 0:
+                nn.utils.clip_grad_norm_(inverse_model.parameters(), max_grad_norm)
             optimizer.step()
 
-        # --- Evaluate ---
+        # --- Evaluate (train + val only; test is held out until after training) ---
         inverse_model.eval()
         with torch.no_grad():
             # Train
@@ -743,11 +728,6 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
             else:
                 va_reg = 0.0
 
-            # Test (monitor only)
-            tp_test = inverse_model(prep["k_test"])
-            kr_test = forward_model(tp_test)
-            te_fwd = torch.mean((kr_test - prep["k_test"]) ** 2).item()
-
         if loss_mode == "geometry":
             tr_total = w_fwd * tr_fwd + w_param * tr_reg
             va_total = w_fwd * va_fwd + w_param * va_reg
@@ -762,7 +742,6 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
 
         history["train_fwd"].append(tr_fwd)
         history["val_fwd"].append(va_fwd)
-        history["test_fwd"].append(te_fwd)
         history["train_reg"].append(tr_reg)
         history["val_reg"].append(va_reg)
         history["train_total"].append(tr_total)
@@ -774,8 +753,7 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
         reg_label = {"geometry": "geo", "bounding": "bound", "fwd_only": "—"}[loss_mode]
         if epoch == 1 or epoch % 20 == 0:
             print(f"Epoch {epoch:4d} | train: fwd={tr_fwd:.3e} {reg_label}={tr_reg:.3e} "
-                  f"| val: fwd={va_fwd:.3e} {reg_label}={va_reg:.3e} "
-                  f"| test_fwd={te_fwd:.3e} | lr={lr:.1e}")
+                  f"| val: fwd={va_fwd:.3e} {reg_label}={va_reg:.3e} | lr={lr:.1e}")
 
         if early_stop(va_total, inverse_model):
             print(f"\nEarly stop at epoch {epoch} | best val={early_stop.best_loss:.6e}")
@@ -793,13 +771,13 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
     early_stop.restore_best(inverse_model)
     print(f"Restored best weights | best val={early_stop.best_loss:.6e}")
 
-    # Save final
+    # Save final (scalers as plain dicts for weights_only=True compatibility)
     torch.save({
         "model_state_dict": inverse_model.state_dict(),
         "inv_config": inv_config,
         "fwd_config": prep["fwd_config"],
-        "scaler_X": prep["scaler_X"],
-        "scaler_Y": prep["scaler_Y"],
+        "scaler_X": save_scaler(prep["scaler_X"]),
+        "scaler_Y": save_scaler(prep["scaler_Y"]),
     }, output_dir / "inverse_best.pt")
     print(f"Saved: {output_dir / 'inverse_best.pt'}")
 
@@ -1010,7 +988,6 @@ def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
     # Forward consistency
     axes[0].plot(epochs, history["train_fwd"], label="Train", lw=1.2)
     axes[0].plot(epochs, history["val_fwd"], label="Val", lw=1.2)
-    axes[0].plot(epochs, history["test_fwd"], label="Test", lw=1.2, ls="--")
     axes[0].set_xlabel("Epoch"); axes[0].set_ylabel("MSE")
     axes[0].set_title("Forward Consistency ||FNN(Inv(K)) − K||²")
     axes[0].set_yscale("log"); axes[0].grid(True, alpha=0.3); axes[0].legend()
@@ -1100,11 +1077,11 @@ def inverse_design_from_checkpoint(checkpoint_path: str, k_target_physical: np.n
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     inv_config = ckpt["inv_config"]
     fwd_config = ckpt["fwd_config"]
-    scaler_X = ckpt["scaler_X"]
-    scaler_Y = ckpt["scaler_Y"]
+    scaler_X = load_scaler(ckpt["scaler_X"])
+    scaler_Y = load_scaler(ckpt["scaler_Y"])
     use_log = fwd_config["use_log_targets"]
 
     n_features = len(fwd_config["feature_cols"])
@@ -1121,7 +1098,7 @@ def inverse_design_from_checkpoint(checkpoint_path: str, k_target_physical: np.n
 
     # Load forward model for verification
     fwd_ckpt = torch.load(fwd_config.get("model_path", "diagonal_model.pt"),
-                           map_location=device, weights_only=False)
+                           map_location=device, weights_only=True)
     forward_model = PermeabilityMLP(
         n_inputs=n_features, n_outputs=n_targets,
         hidden_layers=fwd_config["hidden_layers"],
