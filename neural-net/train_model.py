@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -25,10 +26,12 @@ from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 
 # Import shared components
 from model_config import (
-    CONFIG, set_seed, load_and_preprocess_data, make_loaders,
+    CONFIG, set_seed, setup_logging, load_and_preprocess_data, make_loaders,
     PermeabilityMLP, EarlyStopping, train_one_epoch, validate,
     save_scaler, load_scaler,
 )
+
+logger = logging.getLogger("permeability")
 
 
 def build_model(config: dict, n_features: int, n_targets: int) -> nn.Module:
@@ -39,16 +42,16 @@ def build_model(config: dict, n_features: int, n_targets: int) -> nn.Module:
         dropout_rate=config["dropout_rate"],
     )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print("\nModel:")
-    print(f"  Input: {n_features} → Hidden: {config['hidden_layers']} → Output: {n_targets}")
-    print(f"  Trainable parameters: {n_params:,}")
+    logger.info("Model:")
+    logger.info("  Input: %d → Hidden: %s → Output: %d", n_features, config["hidden_layers"], n_targets)
+    logger.info("  Trainable parameters: %s", f"{n_params:,}")
     return model
 
 
 def train_model(model: nn.Module, loaders: dict, config: dict, device: torch.device) -> dict:
-    print("\n" + "=" * 60)
-    print("TRAINING")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("TRAINING")
+    logger.info("=" * 60)
 
     model = model.to(device)
     criterion = nn.MSELoss()
@@ -86,14 +89,15 @@ def train_model(model: nn.Module, loaders: dict, config: dict, device: torch.dev
         scheduler.step(va)
 
         if epoch == 1 or epoch % 20 == 0:
-            print(f"Epoch {epoch:4d} | train={tr:.6e} | val={va:.6e} | lr={lr:.2e}")
+            logger.info("Epoch %4d | train=%s | val=%s | lr=%s",
+                        epoch, f"{tr:.6e}", f"{va:.6e}", f"{lr:.2e}")
 
         if early_stop(va, model):
-            print(f"\nEarly stop at epoch {epoch} | best val={early_stop.best_loss:.6e}")
+            logger.info("Early stop at epoch %d | best val=%s", epoch, f"{early_stop.best_loss:.6e}")
             break
 
     early_stop.restore_best(model)
-    print(f"Restored best weights | best val={early_stop.best_loss:.6e}")
+    logger.info("Restored best weights | best val=%s", f"{early_stop.best_loss:.6e}")
     return history
 
 # =============================================================================
@@ -143,22 +147,26 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, physical: bool = Tru
 
 
 def print_metrics_block(title: str, target_names: list[str], m: dict, physical: bool):
-    print("\n" + "-" * 60)
-    print(title)
-    print("-" * 60)
+    logger.info("-" * 60)
+    logger.info(title)
+    logger.info("-" * 60)
     for name, mi in zip(target_names, m["per_component"]):
         if physical:
-            print(f"{name}: R2={mi['R2']:.4f} | MAE={mi['MAE']:.3e} | RMSE={mi['RMSE']:.3e} | "
-                  f"NRMSE={mi['NRMSE']:.3e} | MdAPE={mi['MdAPE']*100:.2f}%")
+            logger.info("%s: R2=%.4f | MAE=%s | RMSE=%s | NRMSE=%s | MdAPE=%.2f%%",
+                        name, mi["R2"], f"{mi['MAE']:.3e}", f"{mi['RMSE']:.3e}",
+                        f"{mi['NRMSE']:.3e}", mi["MdAPE"]*100)
         else:
-            print(f"{name}: R2={mi['R2']:.4f} | MAE={mi['MAE']:.3e} | RMSE={mi['RMSE']:.3e}")
+            logger.info("%s: R2=%.4f | MAE=%s | RMSE=%s",
+                        name, mi["R2"], f"{mi['MAE']:.3e}", f"{mi['RMSE']:.3e}")
 
     o = m["overall"]
     if physical:
-        print(f"Overall: R2={o['R2']:.4f} | MAE={o['MAE']:.3e} | RMSE={o['RMSE']:.3e} | "
-              f"NRMSE={o['NRMSE']:.3e} | MdAPE={o['MdAPE']*100:.2f}%")
+        logger.info("Overall: R2=%.4f | MAE=%s | RMSE=%s | NRMSE=%s | MdAPE=%.2f%%",
+                     o["R2"], f"{o['MAE']:.3e}", f"{o['RMSE']:.3e}",
+                     f"{o['NRMSE']:.3e}", o["MdAPE"]*100)
     else:
-        print(f"Overall: R2={o['R2']:.4f} | MAE={o['MAE']:.3e} | RMSE={o['RMSE']:.3e}")
+        logger.info("Overall: R2=%.4f | MAE=%s | RMSE=%s",
+                     o["R2"], f"{o['MAE']:.3e}", f"{o['RMSE']:.3e}")
 
 # =============================================================================
 # Prediction / Export / Plots
@@ -191,7 +199,7 @@ def export_results_csv(path: str, sample_names, y_true_phys: np.ndarray, y_pred_
         "Pred_Kzz": y_pred_phys[:, 2],
     })
     df.to_csv(path, index=False)
-    print(f"Exported: {path}")
+    logger.info("Exported: %s", path)
 
 
 def plot_parity(y_true: np.ndarray, y_pred: np.ndarray, target_names: list[str],
@@ -224,7 +232,7 @@ def plot_parity(y_true: np.ndarray, y_pred: np.ndarray, target_names: list[str],
     plt.tight_layout()
     plt.savefig(plot_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close()
-    print(f"Saved parity plot: {plot_path}")
+    logger.info("Saved parity plot: %s", plot_path)
 
 
 def plot_training_history(history: dict, output_path: str):
@@ -250,7 +258,7 @@ def plot_training_history(history: dict, output_path: str):
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close()
-    print(f"Saved training history: {output_path}")
+    logger.info("Saved training history: %s", output_path)
 
 # =============================================================================
 # Main
@@ -284,39 +292,49 @@ def parse_args():
         default=None,
         help="Path to JSON file with tuned hyperparameters (from tune_hyperparams.py)"
     )
+    parser.add_argument(
+        "--data", "-d",
+        type=str,
+        default=None,
+        help="Path to CSV data file (overrides config and PERMEABILITY_DATA_PATH env var)",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    setup_logging()
 
-    print("\n" + "=" * 60)
-    print("PERMEABILITY MLP - MODEL TRAINING")
-    print("=" * 60 + "\n")
+    logger.info("=" * 60)
+    logger.info("PERMEABILITY MLP - MODEL TRAINING")
+    logger.info("=" * 60)
 
     set_seed(CONFIG["random_state"])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    logger.info("Using device: %s", device)
     if device.type == "cuda":
-        print(f"  GPU: {torch.cuda.get_device_name(0)}")
+        logger.info("  GPU: %s", torch.cuda.get_device_name(0))
 
     # Load config (with tuned params if provided)
     if args.params:
-        print(f"\nLoading parameters from: {args.params}")
+        logger.info("Loading parameters from: %s", args.params)
         config = load_params_from_json(args.params, CONFIG)
     else:
-        print("\nUsing default parameters from model_config.py")
+        logger.info("Using default parameters from model_config.py")
         config = deepcopy(CONFIG)
 
-    print(f"\nConfiguration:")
-    print(f"  hidden_layers      = {config['hidden_layers']}")
-    print(f"  dropout_rate       = {config['dropout_rate']}")
-    print(f"  learning_rate      = {config['learning_rate']}")
-    print(f"  weight_decay       = {config['weight_decay']}")
-    print(f"  batch_size         = {config['batch_size']}")
-    print(f"  scheduler_factor   = {config['scheduler_factor']}")
-    print(f"  scheduler_patience = {config['scheduler_patience']}")
+    if args.data:
+        config["data_path"] = args.data
+
+    logger.info("Configuration:")
+    logger.info("  hidden_layers      = %s", config["hidden_layers"])
+    logger.info("  dropout_rate       = %s", config["dropout_rate"])
+    logger.info("  learning_rate      = %s", config["learning_rate"])
+    logger.info("  weight_decay       = %s", config["weight_decay"])
+    logger.info("  batch_size         = %s", config["batch_size"])
+    logger.info("  scheduler_factor   = %s", config["scheduler_factor"])
+    logger.info("  scheduler_patience = %s", config["scheduler_patience"])
 
     # Load and preprocess data
     data = load_and_preprocess_data(config)
@@ -345,7 +363,7 @@ def main():
         "scaler_X": save_scaler(data["scaler_X"]),
         "scaler_Y": save_scaler(data["scaler_Y"]),
     }, model_path)
-    print(f"\nSaved checkpoint: {model_path}")
+    logger.info("Saved checkpoint: %s", model_path)
 
     # Predictions
     y_val_pred_m, y_val_pred_k = predict(model, data["X_val_scaled"], data["scaler_Y"], config, device)
@@ -380,16 +398,16 @@ def main():
     plot_parity(y_test_true_k, y_test_pred_k, targets, plot_test, "Parity (Test) - log10(K) [Held-out]")
     plot_training_history(history, history_plot)
 
-    print("\n" + "=" * 60)
-    print("TRAINING COMPLETE")
-    print("=" * 60)
-    print(f"\nOutputs in: {output_dir}")
-    print(f"  • Model:            {model_path}")
-    print(f"  • Val CSV:          {val_csv}")
-    print(f"  • Test CSV:         {test_csv}")
-    print(f"  • Val parity plot:  {plot_val}")
-    print(f"  • Test parity plot: {plot_test}")
-    print(f"  • History plot:     {history_plot}")
+    logger.info("=" * 60)
+    logger.info("TRAINING COMPLETE")
+    logger.info("=" * 60)
+    logger.info("Outputs in: %s", output_dir)
+    logger.info("  Model:            %s", model_path)
+    logger.info("  Val CSV:          %s", val_csv)
+    logger.info("  Test CSV:         %s", test_csv)
+    logger.info("  Val parity plot:  %s", plot_val)
+    logger.info("  Test parity plot: %s", plot_test)
+    logger.info("  History plot:     %s", history_plot)
 
 
 if __name__ == "__main__":

@@ -9,8 +9,10 @@ Usage:
     python tune_hyperparams.py
 """
 
+import argparse
 import gc
 import json
+import logging
 import numpy as np
 import torch
 import torch.nn as nn
@@ -27,9 +29,11 @@ except ImportError:
 
 # Import shared components
 from model_config import (
-    CONFIG, set_seed, load_and_preprocess_data, make_loaders,
+    CONFIG, set_seed, setup_logging, load_and_preprocess_data, make_loaders,
     PermeabilityMLP, EarlyStopping, train_one_epoch, validate,
 )
+
+logger = logging.getLogger("permeability")
 
 
 @torch.no_grad()
@@ -57,9 +61,9 @@ def suggest_hidden_layers(trial) -> list[int]:
 
 
 def run_optuna_hpo(data: dict, config: dict, device: torch.device) -> dict:
-    print("\n" + "=" * 60)
-    print("OPTUNA HYPERPARAMETER OPTIMIZATION")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("OPTUNA HYPERPARAMETER OPTIMIZATION")
+    logger.info("=" * 60)
 
     sampler = optuna.samplers.TPESampler(seed=int(config["optuna_seed"]))
 
@@ -167,9 +171,9 @@ def run_optuna_hpo(data: dict, config: dict, device: torch.device) -> dict:
         show_progress_bar=True,
     )
 
-    print("\nBest trial:")
-    print(f"  value (val MAE model-space): {study.best_value:.6e}")
-    print(f"  params: {study.best_params}")
+    logger.info("Best trial:")
+    logger.info("  value (val MAE model-space): %s", f"{study.best_value:.6e}")
+    logger.info("  params: %s", study.best_params)
 
     # Save trials table
     output_dir = Path(config["output_dir"])
@@ -178,7 +182,7 @@ def run_optuna_hpo(data: dict, config: dict, device: torch.device) -> dict:
     trials_csv = str(output_dir / config["optuna_results_csv"])
     trials_df = study.trials_dataframe()
     trials_df.to_csv(trials_csv, index=False)
-    print(f"Saved Optuna trials: {trials_csv}")
+    logger.info("Saved Optuna trials: %s", trials_csv)
 
     # Save best params with reconstructed hidden_layers for easy loading
     best_params = study.best_params.copy()
@@ -203,36 +207,54 @@ def run_optuna_hpo(data: dict, config: dict, device: torch.device) -> dict:
     params_path = str(output_dir / config["best_params_json"])
     with open(params_path, "w") as f:
         json.dump(output, f, indent=2)
-    print(f"Saved best params: {params_path}")
+    logger.info("Saved best params: %s", params_path)
 
     return output
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Optuna HPO for permeability MLP")
+    parser.add_argument(
+        "--data", "-d",
+        type=str,
+        default=None,
+        help="Path to CSV data file (overrides config and PERMEABILITY_DATA_PATH env var)",
+    )
+    return parser.parse_args()
+
+
 def main():
-    print("\n" + "=" * 60)
-    print("PERMEABILITY MLP - HYPERPARAMETER TUNING")
-    print("=" * 60 + "\n")
+    args = parse_args()
+    setup_logging()
+
+    logger.info("=" * 60)
+    logger.info("PERMEABILITY MLP - HYPERPARAMETER TUNING")
+    logger.info("=" * 60)
 
     set_seed(CONFIG["random_state"])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    logger.info("Using device: %s", device)
     if device.type == "cuda":
-        print(f"  GPU: {torch.cuda.get_device_name(0)}")
+        logger.info("  GPU: %s", torch.cuda.get_device_name(0))
 
-    data = load_and_preprocess_data(CONFIG)
+    config = deepcopy(CONFIG)
+    if args.data:
+        config["data_path"] = args.data
 
-    hpo_result = run_optuna_hpo(data, CONFIG, device)
+    data = load_and_preprocess_data(config)
 
-    output_dir = Path(CONFIG["output_dir"])
-    params_path = output_dir / CONFIG["best_params_json"]
+    hpo_result = run_optuna_hpo(data, config, device)
 
-    print("\n" + "=" * 60)
-    print("TUNING COMPLETE")
-    print("=" * 60)
-    print(f"\nBest parameters saved to: {params_path}")
-    print("\nTo train with these parameters, run:")
-    print(f"  python train_model.py --params {params_path}")
+    output_dir = Path(config["output_dir"])
+    params_path = output_dir / config["best_params_json"]
+
+    logger.info("=" * 60)
+    logger.info("TUNING COMPLETE")
+    logger.info("=" * 60)
+    logger.info("Best parameters saved to: %s", params_path)
+    logger.info("To train with these parameters, run:")
+    logger.info("  python train_model.py --params %s", params_path)
 
 
 if __name__ == "__main__":

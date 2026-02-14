@@ -6,6 +6,8 @@ Contains CONFIG, data loading, model definition, and utilities shared between
 tune_hyperparams.py and train_model.py.
 """
 
+import logging
+import os
 import numpy as np
 import pandas as pd
 import torch
@@ -16,13 +18,31 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 
+logger = logging.getLogger("permeability")
+
+
+def setup_logging(level: int = logging.INFO):
+    """Configure the 'permeability' logger with a console handler."""
+    root = logging.getLogger("permeability")
+    if root.handlers:
+        return  # already configured
+    root.setLevel(level)
+    handler = logging.StreamHandler()
+    handler.setLevel(level)
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-7s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    root.addHandler(handler)
+
 # =============================================================================
 # Configuration
 # =============================================================================
 
 CONFIG = {
-    # Data
-    "data_path": "256-final.csv",
+    # Data (override via PERMEABILITY_DATA_PATH env var or --data CLI arg)
+    "data_path": os.environ.get("PERMEABILITY_DATA_PATH", "256-final.csv"),
     "feature_cols": [
         "a20", "a11", "a02", "a10", "a01", "a00",
         "m", "porosity", "tortuosity_geometric_x", "tortuosity_geometric_y", "tortuosity_geometric_z"
@@ -126,9 +146,9 @@ def load_and_preprocess_data(config: dict) -> dict:
     Load CSV, optionally log-transform targets, split into train/val/test (70/20/10),
     scale features and targets (fit scalers on TRAIN only), and return arrays + metadata.
     """
-    print("=" * 60)
-    print("DATA LOADING & PREPROCESSING")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("DATA LOADING & PREPROCESSING")
+    logger.info("=" * 60)
 
     train_frac = float(config["train_frac"])
     val_frac = float(config["val_frac"])
@@ -137,7 +157,7 @@ def load_and_preprocess_data(config: dict) -> dict:
         raise ValueError(f"Split fractions must sum to 1.0; got {train_frac+val_frac+test_frac:.6f}")
 
     df = pd.read_csv(config["data_path"])
-    print(f"Loaded {len(df)} samples from {config['data_path']}")
+    logger.info("Loaded %d samples from %s", len(df), config["data_path"])
 
     required_cols = config["feature_cols"] + config["target_cols"] + [config["metadata_col"]]
     missing_cols = [c for c in required_cols if c not in df.columns]
@@ -157,15 +177,15 @@ def load_and_preprocess_data(config: dict) -> dict:
     if config["use_log_targets"]:
         k_floor = float(config.get("k_floor", 0.0))
         if (Y <= 0).any():
-            print("[WARN] Non-positive K detected; applying floor before log10.")
+            logger.warning("Non-positive K detected; applying floor before log10.")
         Y_model = np.log10(np.maximum(Y, k_floor)).astype(np.float32)
-        print("Targets: log10(K)")
-        print(f"  Raw K range:    [{Y.min():.3e}, {Y.max():.3e}]")
-        print(f"  log10(K) range: [{Y_model.min():.3f}, {Y_model.max():.3f}]")
+        logger.info("Targets: log10(K)")
+        logger.info("  Raw K range:    [%s, %s]", f"{Y.min():.3e}", f"{Y.max():.3e}")
+        logger.info("  log10(K) range: [%.3f, %.3f]", Y_model.min(), Y_model.max())
     else:
         Y_model = Y
-        print("Targets: raw K")
-        print(f"  Raw K range: [{Y.min():.3e}, {Y.max():.3e}]")
+        logger.info("Targets: raw K")
+        logger.info("  Raw K range: [%s, %s]", f"{Y.min():.3e}", f"{Y.max():.3e}")
 
     # 70/20/10 split via two-stage splitting
     indices = np.arange(len(X))
@@ -180,10 +200,10 @@ def load_and_preprocess_data(config: dict) -> dict:
         temp_idx, test_size=(1.0 - val_within_temp), random_state=config["random_state"]
     )
 
-    print("\nSplit sizes:")
-    print(f"  Train: {len(train_idx)} ({len(train_idx)/len(X)*100:.1f}%)")
-    print(f"  Val:   {len(val_idx)} ({len(val_idx)/len(X)*100:.1f}%)")
-    print(f"  Test:  {len(test_idx)} ({len(test_idx)/len(X)*100:.1f}%)")
+    logger.info("Split sizes:")
+    logger.info("  Train: %d (%.1f%%)", len(train_idx), len(train_idx)/len(X)*100)
+    logger.info("  Val:   %d (%.1f%%)", len(val_idx), len(val_idx)/len(X)*100)
+    logger.info("  Test:  %d (%.1f%%)", len(test_idx), len(test_idx)/len(X)*100)
 
     X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
     Y_train_m, Y_val_m, Y_test_m = Y_model[train_idx], Y_model[val_idx], Y_model[test_idx]
