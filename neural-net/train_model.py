@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from copy import deepcopy
+from pathlib import Path
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 
 # Import shared components
@@ -369,6 +370,18 @@ def main():
     data = load_and_preprocess_data(config)
     loaders = make_loaders(data, int(config["batch_size"]))
 
+    # Create output directory
+    output_dir = Path(config["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resolve output paths inside output directory
+    model_path = str(output_dir / config["model_path"])
+    val_csv = str(output_dir / config["val_output_csv"])
+    test_csv = str(output_dir / config["test_output_csv"])
+    plot_val = str(output_dir / config["plot_path_val"])
+    plot_test = str(output_dir / config["plot_path_test"])
+    history_plot = str(output_dir / config["training_history_path"])
+
     # Build and train model
     model = build_model(config, data["n_features"], data["n_targets"])
     history = train_model(model, loaders, config, device)
@@ -379,8 +392,8 @@ def main():
         "config": config,
         "scaler_X": data["scaler_X"],
         "scaler_Y": data["scaler_Y"],
-    }, config["model_path"])
-    print(f"\nSaved checkpoint: {config['model_path']}")
+    }, model_path)
+    print(f"\nSaved checkpoint: {model_path}")
 
     # Predictions
     y_val_pred_m, y_val_pred_k = predict(model, data["X_val_scaled"], data["scaler_Y"], config, device)
@@ -407,24 +420,24 @@ def main():
     print_metrics_block(f"TEST METRICS (Model space = {label}) [HELD-OUT]", targets, m_test_model, physical=False)
 
     # Export
-    export_results_csv(config["val_output_csv"], data["names_val"], y_val_true_k, y_val_pred_k)
-    export_results_csv(config["test_output_csv"], data["names_test"], y_test_true_k, y_test_pred_k)
+    export_results_csv(val_csv, data["names_val"], y_val_true_k, y_val_pred_k)
+    export_results_csv(test_csv, data["names_test"], y_test_true_k, y_test_pred_k)
 
     # Plots
-    plot_parity(y_val_true_k, y_val_pred_k, targets, config["plot_path_val"], "Parity (Validation) - log10(K)")
-    plot_parity(y_test_true_k, y_test_pred_k, targets, config["plot_path_test"], "Parity (Test) - log10(K) [Held-out]")
-    plot_training_history(history, config["training_history_path"])
+    plot_parity(y_val_true_k, y_val_pred_k, targets, plot_val, "Parity (Validation) - log10(K)")
+    plot_parity(y_test_true_k, y_test_pred_k, targets, plot_test, "Parity (Test) - log10(K) [Held-out]")
+    plot_training_history(history, history_plot)
 
     print("\n" + "=" * 60)
     print("TRAINING COMPLETE")
     print("=" * 60)
-    print(f"\nOutputs:")
-    print(f"  • Model:            {config['model_path']}")
-    print(f"  • Val CSV:          {config['val_output_csv']}")
-    print(f"  • Test CSV:         {config['test_output_csv']}")
-    print(f"  • Val parity plot:  {config['plot_path_val']}")
-    print(f"  • Test parity plot: {config['plot_path_test']}")
-    print(f"  • History plot:     {config['training_history_path']}")
+    print(f"\nOutputs in: {output_dir}")
+    print(f"  • Model:            {model_path}")
+    print(f"  • Val CSV:          {val_csv}")
+    print(f"  • Test CSV:         {test_csv}")
+    print(f"  • Val parity plot:  {plot_val}")
+    print(f"  • Test parity plot: {plot_test}")
+    print(f"  • History plot:     {history_plot}")
 
 
 if __name__ == "__main__":

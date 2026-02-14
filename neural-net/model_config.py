@@ -71,6 +71,7 @@ CONFIG = {
     "tune_early_stop_min_delta": 1e-7,
 
     # Output paths
+    "output_dir": "forward_model_output",
     "optuna_results_csv": "optuna_trials.csv",
     "best_params_json": "optuna_best_params.json",
     "model_path": "best_model.pt",
