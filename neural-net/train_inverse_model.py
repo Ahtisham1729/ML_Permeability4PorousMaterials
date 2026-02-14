@@ -43,6 +43,7 @@ Usage:
 import argparse
 import gc
 import json
+import logging
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -64,9 +65,11 @@ except ImportError:
 
 # Import from your existing forward model infrastructure
 from model_config import (
-    CONFIG, set_seed, load_and_preprocess_data, PermeabilityMLP,
+    CONFIG, set_seed, setup_logging, load_and_preprocess_data, PermeabilityMLP,
     EarlyStopping, save_scaler, load_scaler,
 )
+
+logger = logging.getLogger("permeability")
 
 
 # =============================================================================
@@ -205,9 +208,9 @@ def prepare_inverse_data(forward_checkpoint_path: str, device: torch.device):
     Load data using the same pipeline as forward training, then reorganise
     for inverse training:  K (targets) become inputs, features become outputs.
     """
-    print("\n" + "=" * 60)
-    print("DATA PREPARATION (reusing forward model pipeline)")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("DATA PREPARATION (reusing forward model pipeline)")
+    logger.info("=" * 60)
 
     # Load forward checkpoint
     checkpoint = torch.load(forward_checkpoint_path, map_location=device, weights_only=True)
@@ -215,9 +218,9 @@ def prepare_inverse_data(forward_checkpoint_path: str, device: torch.device):
     scaler_X = load_scaler(checkpoint["scaler_X"])
     scaler_Y = load_scaler(checkpoint["scaler_Y"])
 
-    print(f"Forward config loaded from checkpoint")
-    print(f"  Features ({len(fwd_config['feature_cols'])}): {fwd_config['feature_cols']}")
-    print(f"  Targets  ({len(fwd_config['target_cols'])}): {fwd_config['target_cols']}")
+    logger.info("Forward config loaded from checkpoint")
+    logger.info("  Features (%d): %s", len(fwd_config["feature_cols"]), fwd_config["feature_cols"])
+    logger.info("  Targets  (%d): %s", len(fwd_config["target_cols"]), fwd_config["target_cols"])
 
     # Reload data using the SAME config
     data = load_and_preprocess_data(fwd_config)
@@ -239,7 +242,7 @@ def prepare_inverse_data(forward_checkpoint_path: str, device: torch.device):
         p.requires_grad = False
 
     n_params = sum(p.numel() for p in forward_model.parameters())
-    print(f"\nForward model loaded: {n_params:,} parameters (frozen)")
+    logger.info("Forward model loaded: %s parameters (frozen)", f"{n_params:,}")
 
     # Prepare tensors
     dtype = torch.float32
@@ -257,10 +260,10 @@ def prepare_inverse_data(forward_checkpoint_path: str, device: torch.device):
     theta_min = theta_train.min(dim=0).values
     theta_max = theta_train.max(dim=0).values
 
-    print(f"\nInverse training data:")
-    print(f"  Train: K {k_train.shape} → θ {theta_train.shape}")
-    print(f"  Val:   K {k_val.shape} → θ {theta_val.shape}")
-    print(f"  Test:  K {k_test.shape} → θ {theta_test.shape}")
+    logger.info("Inverse training data:")
+    logger.info("  Train: K %s → θ %s", k_train.shape, theta_train.shape)
+    logger.info("  Val:   K %s → θ %s", k_val.shape, theta_val.shape)
+    logger.info("  Test:  K %s → θ %s", k_test.shape, theta_test.shape)
 
     return {
         "k_train": k_train, "theta_train": theta_train,
@@ -326,12 +329,12 @@ def run_inverse_optuna_hpo(prep: dict, inv_config: dict, config: dict,
     if optuna is None:
         raise ImportError("Optuna is required for --tune. Install with: pip install optuna")
 
-    print("\n" + "=" * 60)
-    print("OPTUNA HYPERPARAMETER OPTIMIZATION (Inverse Model)")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("OPTUNA HYPERPARAMETER OPTIMIZATION (Inverse Model)")
+    logger.info("=" * 60)
 
     loss_mode = inv_config["loss_mode"]
-    print(f"  Loss mode: {loss_mode}")
+    logger.info("  Loss mode: %s", loss_mode)
 
     sampler = optuna.samplers.TPESampler(seed=int(config["inverse_optuna_seed"]))
 
@@ -497,9 +500,9 @@ def run_inverse_optuna_hpo(prep: dict, inv_config: dict, config: dict,
         show_progress_bar=True,
     )
 
-    print("\nBest trial:")
-    print(f"  value (val forward-consistency MSE): {study.best_value:.6e}")
-    print(f"  params: {study.best_params}")
+    logger.info("Best trial:")
+    logger.info("  value (val forward-consistency MSE): %s", f"{study.best_value:.6e}")
+    logger.info("  params: %s", study.best_params)
 
     # Save trials table
     output_dir = Path(inv_config["output_dir"])
@@ -508,7 +511,7 @@ def run_inverse_optuna_hpo(prep: dict, inv_config: dict, config: dict,
     trials_csv = str(output_dir / config["inverse_optuna_results_csv"])
     trials_df = study.trials_dataframe()
     trials_df.to_csv(trials_csv, index=False)
-    print(f"Saved Optuna trials: {trials_csv}")
+    logger.info("Saved Optuna trials: %s", trials_csv)
 
     # Save best params with reconstructed hidden_layers
     best_params = study.best_params.copy()
@@ -541,7 +544,7 @@ def run_inverse_optuna_hpo(prep: dict, inv_config: dict, config: dict,
     params_path = str(output_dir / config["inverse_best_params_json"])
     with open(params_path, "w") as f:
         json.dump(output_json, f, indent=2)
-    print(f"Saved best params: {params_path}")
+    logger.info("Saved best params: %s", params_path)
 
     return output_json
 
@@ -579,9 +582,9 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
                   resume_path: str = None):
     """Train the inverse model."""
 
-    print("\n" + "=" * 60)
-    print("INVERSE MODEL TRAINING")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("INVERSE MODEL TRAINING")
+    logger.info("=" * 60)
 
     output_dir = Path(inv_config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -622,12 +625,12 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
         for k, v in sd.items():
             clean[k.replace("module.", "")] = v
         inverse_model.load_state_dict(clean)
-        print(f"Resumed from: {resume_path}")
+        logger.info("Resumed from: %s", resume_path)
 
     n_params = sum(p.numel() for p in inverse_model.parameters() if p.requires_grad)
-    print(f"\nInverse model: K ({n_targets}) → features ({n_features})")
-    print(f"  Architecture: {n_targets} → {inv_config['hidden_layers']} → {n_features}")
-    print(f"  Trainable parameters: {n_params:,}")
+    logger.info("Inverse model: K (%d) → features (%d)", n_targets, n_features)
+    logger.info("  Architecture: %d → %s → %d", n_targets, inv_config["hidden_layers"], n_features)
+    logger.info("  Trainable parameters: %s", f"{n_params:,}")
 
     # Loss configuration
     loss_mode = inv_config["loss_mode"]
@@ -635,18 +638,18 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
 
     if loss_mode == "geometry":
         w_param = inv_config["w_parameter_recon"]
-        print(f"\nLoss mode: GEOMETRY")
-        print(f"  L = {w_fwd}×||FNN(Inv(K)) - K||²  +  {w_param}×||Inv(K) - θ_true||²")
+        logger.info("Loss mode: GEOMETRY")
+        logger.info("  L = %s×||FNN(Inv(K)) - K||²  +  %s×||Inv(K) - θ_true||²", w_fwd, w_param)
     elif loss_mode == "bounding":
         w_bound = inv_config["w_bounding"]
-        print(f"\nLoss mode: BOUNDING")
-        print(f"  L = {w_fwd}×||FNN(Inv(K)) - K||²  +  {w_bound}×L_bound")
-        print(f"  L_bound = 0 inside bounds, quadratic outside")
+        logger.info("Loss mode: BOUNDING")
+        logger.info("  L = %s×||FNN(Inv(K)) - K||²  +  %s×L_bound", w_fwd, w_bound)
+        logger.info("  L_bound = 0 inside bounds, quadratic outside")
         if margin > 0:
-            print(f"  Bounds expanded by {margin*100:.0f}% margin")
+            logger.info("  Bounds expanded by %.0f%% margin", margin*100)
     elif loss_mode == "fwd_only":
-        print(f"\nLoss mode: FORWARD ONLY")
-        print(f"  L = {w_fwd}×||FNN(Inv(K)) - K||²")
+        logger.info("Loss mode: FORWARD ONLY")
+        logger.info("  L = %s×||FNN(Inv(K)) - K||²", w_fwd)
     else:
         raise ValueError(f"Unknown loss_mode: {loss_mode}. Use 'geometry', 'bounding', or 'fwd_only'.")
 
@@ -674,7 +677,7 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
         "lr": [],
     }
 
-    print(f"\nStarting training for {inv_config['max_epochs']} epochs...\n")
+    logger.info("Starting training for %d epochs...", inv_config["max_epochs"])
 
     for epoch in range(1, inv_config["max_epochs"] + 1):
 
@@ -752,11 +755,12 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
 
         reg_label = {"geometry": "geo", "bounding": "bound", "fwd_only": "—"}[loss_mode]
         if epoch == 1 or epoch % 20 == 0:
-            print(f"Epoch {epoch:4d} | train: fwd={tr_fwd:.3e} {reg_label}={tr_reg:.3e} "
-                  f"| val: fwd={va_fwd:.3e} {reg_label}={va_reg:.3e} | lr={lr:.1e}")
+            logger.info("Epoch %4d | train: fwd=%s %s=%s | val: fwd=%s %s=%s | lr=%s",
+                        epoch, f"{tr_fwd:.3e}", reg_label, f"{tr_reg:.3e}",
+                        f"{va_fwd:.3e}", reg_label, f"{va_reg:.3e}", f"{lr:.1e}")
 
         if early_stop(va_total, inverse_model):
-            print(f"\nEarly stop at epoch {epoch} | best val={early_stop.best_loss:.6e}")
+            logger.info("Early stop at epoch %d | best val=%s", epoch, f"{early_stop.best_loss:.6e}")
             break
 
         # Periodic checkpoint
@@ -769,7 +773,7 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
 
     # Restore best
     early_stop.restore_best(inverse_model)
-    print(f"Restored best weights | best val={early_stop.best_loss:.6e}")
+    logger.info("Restored best weights | best val=%s", f"{early_stop.best_loss:.6e}")
 
     # Save final (scalers as plain dicts for weights_only=True compatibility)
     torch.save({
@@ -779,7 +783,7 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
         "scaler_X": save_scaler(prep["scaler_X"]),
         "scaler_Y": save_scaler(prep["scaler_Y"]),
     }, output_dir / "inverse_best.pt")
-    print(f"Saved: {output_dir / 'inverse_best.pt'}")
+    logger.info("Saved: %s", output_dir / "inverse_best.pt")
 
     return inverse_model, history
 
@@ -800,9 +804,9 @@ def evaluate_inverse(inverse_model: nn.Module, prep: dict, inv_config: dict,
                      device: torch.device):
     """Full evaluation with forward consistency, parameter metrics, and plots."""
 
-    print("\n" + "=" * 60)
-    print("EVALUATION")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("EVALUATION")
+    logger.info("=" * 60)
 
     output_dir = Path(inv_config["output_dir"])
     fwd_config = prep["fwd_config"]
@@ -841,35 +845,35 @@ def evaluate_inverse(inverse_model: nn.Module, prep: dict, inv_config: dict,
         # Relative error
         rel_err = np.abs(k_ach_phys - k_true_phys) / (np.abs(k_true_phys) + 1e-20)
 
-        print(f"\n--- {split_name} ({len(k_true_sc)} samples) ---")
+        logger.info("--- %s (%d samples) ---", split_name, len(k_true_sc))
 
         fwd_mse = np.mean((k_ach_sc - k_true_sc) ** 2)
-        print(f"  Forward consistency MSE (scaled): {fwd_mse:.6e}")
+        logger.info("  Forward consistency MSE (scaled): %s", f"{fwd_mse:.6e}")
 
-        print(f"\n  Permeability reconstruction (physical):")
-        print(f"    Mean relative error:   {np.mean(rel_err)*100:.2f}%")
-        print(f"    Median relative error: {np.median(rel_err)*100:.2f}%")
-        print(f"    Samples < 5% error:    {np.mean(rel_err < 0.05)*100:.1f}%")
-        print(f"    Samples < 10% error:   {np.mean(rel_err < 0.10)*100:.1f}%")
+        logger.info("  Permeability reconstruction (physical):")
+        logger.info("    Mean relative error:   %.2f%%", np.mean(rel_err)*100)
+        logger.info("    Median relative error: %.2f%%", np.median(rel_err)*100)
+        logger.info("    Samples < 5%% error:    %.1f%%", np.mean(rel_err < 0.05)*100)
+        logger.info("    Samples < 10%% error:   %.1f%%", np.mean(rel_err < 0.10)*100)
 
         for i, name in enumerate(target_names):
             r2 = r2_score(
                 np.log10(np.maximum(k_true_phys[:, i], 1e-30)),
                 np.log10(np.maximum(k_ach_phys[:, i], 1e-30)),
             )
-            print(f"    {name}: MRE={np.mean(rel_err[:, i])*100:.2f}%  R²(log)={r2:.4f}")
+            logger.info("    %s: MRE=%.2f%%  R²(log)=%.4f", name, np.mean(rel_err[:, i])*100, r2)
 
         # Parameter reconstruction — design parameters only
         theta_pred_phys = scaler_X.inverse_transform(theta_pred_sc)
         theta_true_phys = scaler_X.inverse_transform(theta_true_sc)
 
-        print(f"\n  Design parameter reconstruction:")
+        logger.info("  Design parameter reconstruction:")
         for i in design_idx:
             name = feature_names[i]
             mae = np.mean(np.abs(theta_pred_phys[:, i] - theta_true_phys[:, i]))
             rng = np.max(theta_true_phys[:, i]) - np.min(theta_true_phys[:, i])
             nrmse_val = mae / (rng + 1e-20)
-            print(f"    {name:>35s}: MAE={mae:.4f}  NRMSE={nrmse_val:.4f}")
+            logger.info("    %35s: MAE=%.4f  NRMSE=%.4f", name, mae, nrmse_val)
 
         # --- K parity plot ---
         _plot_k_parity(
@@ -922,7 +926,7 @@ def _plot_k_parity(k_true, k_pred, names, path, title):
     plt.tight_layout()
     plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close()
-    print(f"  Saved: {path}")
+    logger.info("  Saved: %s", path)
 
 
 def _plot_parameter_parity(theta_true, theta_pred, names, path, title):
@@ -970,7 +974,7 @@ def _plot_parameter_parity(theta_true, theta_pred, names, path, title):
     plt.tight_layout()
     plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close()
-    print(f"  Saved: {path}")
+    logger.info("  Saved: %s", path)
 
 
 def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
@@ -1015,7 +1019,7 @@ def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close()
-    print(f"Saved: {output_path}")
+    logger.info("Saved: %s", output_path)
 
 
 # =============================================================================
@@ -1026,9 +1030,9 @@ def _print_examples(inverse_model, forward_model, prep, scaler_X, scaler_Y,
                     feature_names, target_names, design_idx, design_names,
                     use_log, device, n=5):
     """Print example inverse designs from test set (design parameters only)."""
-    print(f"\n{'='*60}")
-    print(f"EXAMPLE INVERSE DESIGNS (from test set)")
-    print(f"{'='*60}")
+    logger.info("=" * 60)
+    logger.info("EXAMPLE INVERSE DESIGNS (from test set)")
+    logger.info("=" * 60)
 
     k_test = prep["k_test"]
     theta_test = prep["theta_test"]
@@ -1049,15 +1053,15 @@ def _print_examples(inverse_model, forward_model, prep, scaler_X, scaler_Y,
 
     for idx in range(min(n, len(k_test))):
         rel = np.abs(k_ach_phys[idx] - k_test_phys[idx]) / (np.abs(k_test_phys[idx]) + 1e-20)
-        print(f"\n--- Sample {idx+1} ---")
+        logger.info("--- Sample %d ---", idx+1)
         for i, name in enumerate(target_names):
-            print(f"  {name}: target={k_test_phys[idx, i]:.4e}  "
-                  f"achieved={k_ach_phys[idx, i]:.4e}  "
-                  f"error={rel[i]*100:.2f}%")
-        print(f"  Predicted design parameters vs true:")
+            logger.info("  %s: target=%s  achieved=%s  error=%.2f%%",
+                        name, f"{k_test_phys[idx, i]:.4e}",
+                        f"{k_ach_phys[idx, i]:.4e}", rel[i]*100)
+        logger.info("  Predicted design parameters vs true:")
         for i, name in zip(design_idx, design_names):
-            print(f"    {name:>12s}: pred={theta_pred_phys[idx, i]:>12.4f}  "
-                  f"true={theta_true_phys[idx, i]:>12.4f}")
+            logger.info("    %12s: pred=%12.4f  true=%12.4f",
+                        name, theta_pred_phys[idx, i], theta_true_phys[idx, i])
 
 
 # =============================================================================
@@ -1109,8 +1113,31 @@ def inverse_design_from_checkpoint(checkpoint_path: str, k_target_physical: np.n
 
     # Scale target K
     k_arr = np.atleast_2d(k_target_physical).astype(np.float32)
+    if (k_arr <= 0).any() and use_log:
+        raise ValueError("All target K values must be positive when using log targets.")
     k_log = np.log10(k_arr + 1e-20) if use_log else k_arr
     k_scaled = scaler_Y.transform(k_log)
+
+    # OOD check: warn if any scaled values fall outside [0, 1] (training range)
+    logger = logging.getLogger("permeability")
+    ood_low = k_scaled < -0.05
+    ood_high = k_scaled > 1.05
+    if ood_low.any() or ood_high.any():
+        target_names_ood = fwd_config["target_cols"]
+        msgs = []
+        for j, name in enumerate(target_names_ood):
+            col = k_scaled[:, j]
+            if (col < -0.05).any() or (col > 1.05).any():
+                k_min_train = float(np.power(10.0, scaler_Y.data_min_[j]) if use_log
+                                    else scaler_Y.data_min_[j])
+                k_max_train = float(np.power(10.0, scaler_Y.data_max_[j]) if use_log
+                                    else scaler_Y.data_max_[j])
+                msgs.append(f"  {name}: training range [{k_min_train:.3e}, {k_max_train:.3e}]")
+        logger.warning(
+            "Target K values are outside the training distribution. "
+            "Predictions may be unreliable.\n" + "\n".join(msgs)
+        )
+
     k_tensor = torch.tensor(k_scaled, dtype=torch.float32, device=device)
 
     with torch.no_grad():
@@ -1209,19 +1236,20 @@ Examples:
 
 def main():
     args = parse_args()
+    setup_logging()
 
-    print("\n" + "=" * 60)
-    print("INVERSE DESIGN MODEL TRAINING")
-    print(f"  Forward: features (11) → K (3)")
-    print(f"  Inverse: K (3) → features (11)")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("INVERSE DESIGN MODEL TRAINING")
+    logger.info("  Forward: features (11) → K (3)")
+    logger.info("  Inverse: K (3) → features (11)")
+    logger.info("=" * 60)
 
     set_seed(CONFIG["random_state"])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    logger.info("Device: %s", device)
     if device.type == "cuda":
-        print(f"  GPU: {torch.cuda.get_device_name(0)}")
+        logger.info("  GPU: %s", torch.cuda.get_device_name(0))
 
     inv_config = deepcopy(INVERSE_CONFIG)
 
@@ -1242,7 +1270,7 @@ def main():
 
     # --- Load tuned params from JSON (if provided) ---
     if args.params:
-        print(f"\nLoading tuned parameters from: {args.params}")
+        logger.info("Loading tuned parameters from: %s", args.params)
         inv_config = load_inverse_params_from_json(args.params, inv_config)
 
     # --- Optuna HPO (if requested) ---
@@ -1257,25 +1285,25 @@ def main():
 
         if args.tune_only:
             output_dir = Path(inv_config["output_dir"])
-            print("\n" + "=" * 60)
-            print("TUNING COMPLETE (--tune_only)")
-            print("=" * 60)
-            print(f"\nBest parameters saved to: {output_dir / CONFIG['inverse_best_params_json']}")
-            print(f"\nTo train with these parameters, run:")
-            print(f"  python train_inverse_model.py -f {args.forward_checkpoint} "
-                  f"--params {output_dir / CONFIG['inverse_best_params_json']}")
+            logger.info("=" * 60)
+            logger.info("TUNING COMPLETE (--tune_only)")
+            logger.info("=" * 60)
+            logger.info("Best parameters saved to: %s", output_dir / CONFIG["inverse_best_params_json"])
+            logger.info("To train with these parameters, run:")
+            logger.info("  python train_inverse_model.py -f %s --params %s",
+                        args.forward_checkpoint, output_dir / CONFIG["inverse_best_params_json"])
             return
 
     # Print final configuration
-    print(f"\nConfiguration:")
-    print(f"  hidden_layers      = {inv_config['hidden_layers']}")
-    print(f"  dropout_rate       = {inv_config['dropout_rate']}")
-    print(f"  learning_rate      = {inv_config['learning_rate']}")
-    print(f"  weight_decay       = {inv_config['weight_decay']}")
-    print(f"  batch_size         = {inv_config['batch_size']}")
-    print(f"  scheduler_factor   = {inv_config['scheduler_factor']}")
-    print(f"  scheduler_patience = {inv_config['scheduler_patience']}")
-    print(f"  loss_mode          = {inv_config['loss_mode']}")
+    logger.info("Configuration:")
+    logger.info("  hidden_layers      = %s", inv_config["hidden_layers"])
+    logger.info("  dropout_rate       = %s", inv_config["dropout_rate"])
+    logger.info("  learning_rate      = %s", inv_config["learning_rate"])
+    logger.info("  weight_decay       = %s", inv_config["weight_decay"])
+    logger.info("  batch_size         = %s", inv_config["batch_size"])
+    logger.info("  scheduler_factor   = %s", inv_config["scheduler_factor"])
+    logger.info("  scheduler_patience = %s", inv_config["scheduler_patience"])
+    logger.info("  loss_mode          = %s", inv_config["loss_mode"])
 
     # Train
     inverse_model, history = train_inverse(
@@ -1290,22 +1318,21 @@ def main():
     # Evaluate (includes both K and parameter parity plots)
     evaluate_inverse(inverse_model, prep, inv_config, device)
 
-    print("\n" + "=" * 60)
-    print("TRAINING COMPLETE")
-    print("=" * 60)
-    print(f"\nLoss mode: {inv_config['loss_mode']}")
-    print(f"Outputs in: {output_dir}")
-    print(f"  • Best model:       {output_dir / 'inverse_best.pt'}")
-    print(f"  • History plot:      {output_dir / 'inverse_training_history.png'}")
-    print(f"  • K parity plots:   {output_dir / 'inverse_parity_K_*.png'}")
-    print(f"  • Param parity:     {output_dir / 'inverse_parity_params_*.png'}")
-
-    print(f"\nFor inference:")
-    print(f"  from train_inverse_model import inverse_design_from_checkpoint")
-    print(f"  results = inverse_design_from_checkpoint(")
-    print(f"      '{output_dir / 'inverse_best.pt'}',")
-    print(f"      k_target_physical=np.array([1.0, 1.5, 0.8])")
-    print(f"  )")
+    logger.info("=" * 60)
+    logger.info("TRAINING COMPLETE")
+    logger.info("=" * 60)
+    logger.info("Loss mode: %s", inv_config["loss_mode"])
+    logger.info("Outputs in: %s", output_dir)
+    logger.info("  Best model:       %s", output_dir / "inverse_best.pt")
+    logger.info("  History plot:      %s", output_dir / "inverse_training_history.png")
+    logger.info("  K parity plots:   %s", output_dir / "inverse_parity_K_*.png")
+    logger.info("  Param parity:     %s", output_dir / "inverse_parity_params_*.png")
+    logger.info("For inference:")
+    logger.info("  from train_inverse_model import inverse_design_from_checkpoint")
+    logger.info("  results = inverse_design_from_checkpoint(")
+    logger.info("      '%s',", output_dir / "inverse_best.pt")
+    logger.info("      k_target_physical=np.array([1.0, 1.5, 0.8])")
+    logger.info("  )")
 
 
 if __name__ == "__main__":
