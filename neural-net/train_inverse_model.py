@@ -29,9 +29,19 @@ Usage:
     python train_inverse_model.py -f diagonal_model.pt --loss_mode bounding
     python train_inverse_model.py -f diagonal_model.pt --loss_mode geometry --w_param 0.05
     python train_inverse_model.py -f diagonal_model.pt --resume inverse_best.pt
+
+    # Optuna hyperparameter tuning (tune + train in one run):
+    python train_inverse_model.py -f diagonal_model.pt --tune
+
+    # Tune only (save best params, skip training):
+    python train_inverse_model.py -f diagonal_model.pt --tune_only
+
+    # Train with previously tuned parameters:
+    python train_inverse_model.py -f diagonal_model.pt --params inverse_optuna_best_params.json
 """
 
 import argparse
+import gc
 import json
 import numpy as np
 import pandas as pd
@@ -46,6 +56,11 @@ from copy import deepcopy
 from pathlib import Path
 from collections import OrderedDict
 from sklearn.metrics import r2_score
+
+try:
+    import optuna
+except ImportError:
+    optuna = None  # Only required when --tune is used
 
 # Import from your existing forward model infrastructure
 from model_config import CONFIG, set_seed, load_and_preprocess_data, PermeabilityMLP
@@ -284,6 +299,297 @@ def prepare_inverse_data(forward_checkpoint_path: str, device: torch.device):
         "n_targets": n_targets,
         "data": data,
     }
+
+
+# =============================================================================
+# Optuna HPO for Inverse Model
+# =============================================================================
+
+def suggest_inverse_hidden_layers(trial) -> list[int]:
+    """
+    Sample a symmetric (encoder-decoder) width schedule for the inverse MLP.
+
+    The inverse model maps a low-dimensional input (K, 3 dims) to a
+    higher-dimensional output (features, 11 dims), so the architecture
+    expands then contracts (bottleneck style).
+    """
+    n_layers = trial.suggest_int("n_layers", 3, 7)
+    hidden_base = trial.suggest_int("hidden_base", 128, 1024, step=64)
+    width_decay = trial.suggest_float("width_decay", 0.5, 1.0)
+
+    # Build expanding half
+    half = n_layers // 2
+    dims_up = []
+    w = float(hidden_base) * (width_decay ** half)  # start narrow
+    for _ in range(half):
+        dims_up.append(int(max(32, round(w / 8) * 8)))
+        w /= width_decay  # expand towards base
+
+    # Middle layer at full width
+    dims_mid = [int(max(32, round(float(hidden_base) / 8) * 8))]
+
+    # Build contracting half
+    dims_down = []
+    w = float(hidden_base)
+    for _ in range(n_layers - half - 1):
+        w *= width_decay
+        dims_down.append(int(max(32, round(w / 8) * 8)))
+
+    return dims_up + dims_mid + dims_down
+
+
+def run_inverse_optuna_hpo(prep: dict, inv_config: dict, config: dict,
+                           device: torch.device) -> dict:
+    """
+    Run Optuna HPO to find optimal hyperparameters for the inverse MLP.
+
+    Optimises validation forward-consistency MSE (scaled space) as the
+    primary objective — this is the metric that matters most for inverse
+    design quality.
+    """
+    if optuna is None:
+        raise ImportError("Optuna is required for --tune. Install with: pip install optuna")
+
+    print("\n" + "=" * 60)
+    print("OPTUNA HYPERPARAMETER OPTIMIZATION (Inverse Model)")
+    print("=" * 60)
+
+    loss_mode = inv_config["loss_mode"]
+    print(f"  Loss mode: {loss_mode}")
+
+    sampler = optuna.samplers.TPESampler(seed=int(config["inverse_optuna_seed"]))
+
+    pruner_name = str(config.get("inverse_optuna_pruner", "median")).lower()
+    if pruner_name == "median":
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=int(config["inverse_optuna_startup_trials"]),
+            n_warmup_steps=int(config["inverse_optuna_warmup_steps"]),
+        )
+    else:
+        pruner = optuna.pruners.NopPruner()
+
+    storage = config.get("inverse_optuna_db", None)
+    study = optuna.create_study(
+        study_name=str(config["inverse_optuna_study_name"]),
+        direction="minimize",
+        sampler=sampler,
+        pruner=pruner,
+        storage=storage,
+        load_if_exists=bool(storage),
+    )
+
+    # Cached tensors
+    k_train, theta_train = prep["k_train"], prep["theta_train"]
+    k_val, theta_val = prep["k_val"], prep["theta_val"]
+    forward_model = prep["forward_model"]
+    n_features = prep["n_features"]
+    n_targets = prep["n_targets"]
+
+    # Bounding loss bounds
+    theta_min = prep["theta_min"]
+    theta_max = prep["theta_max"]
+
+    tune_max_epochs = int(config["inverse_tune_max_epochs"])
+    tune_es_patience = int(config["inverse_tune_early_stop_patience"])
+    tune_es_min_delta = float(config["inverse_tune_early_stop_min_delta"])
+
+    def objective(trial: optuna.Trial) -> float:
+        base_seed = int(config["random_state"])
+        set_seed(base_seed + int(trial.number))
+
+        # --- Architecture ---
+        hidden_layers = suggest_inverse_hidden_layers(trial)
+        dropout_rate = trial.suggest_float("dropout_rate", 0.0, 0.3)
+
+        # --- Optimiser ---
+        learning_rate = trial.suggest_float("learning_rate", 1e-5, 5e-3, log=True)
+        weight_decay = trial.suggest_float("weight_decay", 1e-8, 1e-3, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [64, 128, 256, 512])
+
+        # --- Scheduler ---
+        scheduler_factor = trial.suggest_float("scheduler_factor", 0.3, 0.8)
+        scheduler_patience = trial.suggest_int("scheduler_patience", 8, 30)
+
+        # --- Loss weights (mode-dependent) ---
+        if loss_mode == "geometry":
+            w_fwd = 1.0
+            w_param = trial.suggest_float("w_parameter_recon", 0.01, 1.0, log=True)
+        elif loss_mode == "bounding":
+            w_fwd = 1.0
+            w_bound = trial.suggest_float("w_bounding", 0.1, 10.0, log=True)
+            bound_margin = trial.suggest_float("bound_margin", 0.0, 0.2)
+            theta_range = theta_max - theta_min
+            theta_min_b = theta_min - bound_margin * theta_range
+            theta_max_b = theta_max + bound_margin * theta_range
+        else:  # fwd_only
+            w_fwd = 1.0
+
+        # --- DataLoader ---
+        dataset = TensorDataset(k_train, theta_train)
+        loader = DataLoader(dataset, batch_size=int(batch_size), shuffle=True)
+
+        # --- Build model ---
+        model = InverseMLP(
+            n_inputs=n_targets,
+            n_outputs=n_features,
+            hidden_layers=hidden_layers,
+            dropout_rate=float(dropout_rate),
+        ).to(device)
+
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=float(learning_rate),
+            weight_decay=float(weight_decay),
+        )
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min",
+            factor=float(scheduler_factor),
+            patience=int(scheduler_patience),
+        )
+
+        early_stop = EarlyStopping(
+            patience=tune_es_patience,
+            min_delta=tune_es_min_delta,
+        )
+
+        best_metric = float("inf")
+
+        for epoch in range(1, tune_max_epochs + 1):
+            # --- Train ---
+            model.train()
+            for k_batch, theta_batch in loader:
+                optimizer.zero_grad(set_to_none=True)
+                theta_pred = model(k_batch)
+                k_recon = forward_model(theta_pred)
+                loss_fwd = torch.mean((k_recon - k_batch) ** 2)
+
+                if loss_mode == "geometry":
+                    loss_reg = torch.mean((theta_pred - theta_batch) ** 2)
+                    loss = w_fwd * loss_fwd + w_param * loss_reg
+                elif loss_mode == "bounding":
+                    loss_reg = bounding_loss(theta_pred, theta_min_b, theta_max_b)
+                    loss = w_fwd * loss_fwd + w_bound * loss_reg
+                else:
+                    loss = w_fwd * loss_fwd
+
+                loss.backward()
+                optimizer.step()
+
+            # --- Validate (forward consistency MSE on val set) ---
+            model.eval()
+            with torch.no_grad():
+                tp_val = model(k_val)
+                kr_val = forward_model(tp_val)
+                val_fwd_mse = torch.mean((kr_val - k_val) ** 2).item()
+
+                if loss_mode == "geometry":
+                    val_reg = torch.mean((tp_val - theta_val) ** 2).item()
+                    val_total = w_fwd * val_fwd_mse + w_param * val_reg
+                elif loss_mode == "bounding":
+                    val_reg = bounding_loss(tp_val, theta_min_b, theta_max_b).item()
+                    val_total = w_fwd * val_fwd_mse + w_bound * val_reg
+                else:
+                    val_total = w_fwd * val_fwd_mse
+
+            scheduler.step(val_total)
+
+            # Report forward consistency MSE as the optimisation target
+            trial.report(val_fwd_mse, step=epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+            if val_fwd_mse < best_metric - 1e-12:
+                best_metric = val_fwd_mse
+
+            if early_stop(val_total, model):
+                break
+
+        del model, optimizer, scheduler
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        return float(best_metric)
+
+    study.optimize(
+        objective,
+        n_trials=int(config["inverse_optuna_trials"]),
+        timeout=config["inverse_optuna_timeout_sec"],
+        show_progress_bar=True,
+    )
+
+    print("\nBest trial:")
+    print(f"  value (val forward-consistency MSE): {study.best_value:.6e}")
+    print(f"  params: {study.best_params}")
+
+    # Save trials table
+    output_dir = Path(inv_config["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    trials_csv = str(output_dir / config["inverse_optuna_results_csv"])
+    trials_df = study.trials_dataframe()
+    trials_df.to_csv(trials_csv, index=False)
+    print(f"Saved Optuna trials: {trials_csv}")
+
+    # Save best params with reconstructed hidden_layers
+    best_params = study.best_params.copy()
+
+    if "n_layers" in best_params and "hidden_base" in best_params and "width_decay" in best_params:
+        n_layers = int(best_params["n_layers"])
+        hidden_base = int(best_params["hidden_base"])
+        width_decay = float(best_params["width_decay"])
+
+        half = n_layers // 2
+        dims_up = []
+        w = float(hidden_base) * (width_decay ** half)
+        for _ in range(half):
+            dims_up.append(int(max(32, round(w / 8) * 8)))
+            w /= width_decay
+        dims_mid = [int(max(32, round(float(hidden_base) / 8) * 8))]
+        dims_down = []
+        w = float(hidden_base)
+        for _ in range(n_layers - half - 1):
+            w *= width_decay
+            dims_down.append(int(max(32, round(w / 8) * 8)))
+        best_params["hidden_layers"] = dims_up + dims_mid + dims_down
+
+    output_json = {
+        "best_value": float(study.best_value),
+        "loss_mode": loss_mode,
+        "best_params": best_params,
+    }
+
+    params_path = str(output_dir / config["inverse_best_params_json"])
+    with open(params_path, "w") as f:
+        json.dump(output_json, f, indent=2)
+    print(f"Saved best params: {params_path}")
+
+    return output_json
+
+
+def load_inverse_params_from_json(path: str, base_config: dict) -> dict:
+    """Load tuned inverse parameters from JSON and merge with base config."""
+    with open(path, "r") as f:
+        data = json.load(f)
+
+    params = data.get("best_params", data)
+    config = deepcopy(base_config)
+
+    # Direct mappings
+    param_keys = [
+        "hidden_layers", "dropout_rate", "learning_rate", "weight_decay",
+        "batch_size", "scheduler_factor", "scheduler_patience",
+        "w_parameter_recon", "w_bounding", "bound_margin",
+    ]
+    for key in param_keys:
+        if key in params:
+            config[key] = params[key]
+
+    # Override loss_mode if saved in the JSON
+    if "loss_mode" in data:
+        config["loss_mode"] = data["loss_mode"]
+
+    return config
 
 
 # =============================================================================
@@ -876,6 +1182,8 @@ Examples:
   python train_inverse_model.py -f diagonal_model.pt
   python train_inverse_model.py -f diagonal_model.pt --loss_mode bounding
   python train_inverse_model.py -f diagonal_model.pt --loss_mode geometry --w_param 0.05
+  python train_inverse_model.py -f diagonal_model.pt --tune
+  python train_inverse_model.py -f diagonal_model.pt --params inverse_optuna_best_params.json
         """,
     )
     parser.add_argument(
@@ -906,6 +1214,18 @@ Examples:
     parser.add_argument(
         "--output_dir", "-o", type=str, default=None,
         help="Output directory",
+    )
+    parser.add_argument(
+        "--tune", action="store_true",
+        help="Run Optuna HPO to find best hyperparameters before training",
+    )
+    parser.add_argument(
+        "--params", "-p", type=str, default=None,
+        help="Path to JSON file with tuned hyperparameters (from --tune or manual)",
+    )
+    parser.add_argument(
+        "--tune_only", action="store_true",
+        help="Run Optuna HPO only (skip final training)",
     )
     return parser.parse_args()
 
@@ -942,6 +1262,43 @@ def main():
 
     # Prepare data & load forward model
     prep = prepare_inverse_data(args.forward_checkpoint, device)
+
+    # --- Load tuned params from JSON (if provided) ---
+    if args.params:
+        print(f"\nLoading tuned parameters from: {args.params}")
+        inv_config = load_inverse_params_from_json(args.params, inv_config)
+
+    # --- Optuna HPO (if requested) ---
+    if args.tune or args.tune_only:
+        hpo_result = run_inverse_optuna_hpo(prep, inv_config, CONFIG, device)
+
+        # Apply best params to inv_config for subsequent training
+        inv_config = load_inverse_params_from_json(
+            str(Path(inv_config["output_dir"]) / CONFIG["inverse_best_params_json"]),
+            inv_config,
+        )
+
+        if args.tune_only:
+            output_dir = Path(inv_config["output_dir"])
+            print("\n" + "=" * 60)
+            print("TUNING COMPLETE (--tune_only)")
+            print("=" * 60)
+            print(f"\nBest parameters saved to: {output_dir / CONFIG['inverse_best_params_json']}")
+            print(f"\nTo train with these parameters, run:")
+            print(f"  python train_inverse_model.py -f {args.forward_checkpoint} "
+                  f"--params {output_dir / CONFIG['inverse_best_params_json']}")
+            return
+
+    # Print final configuration
+    print(f"\nConfiguration:")
+    print(f"  hidden_layers      = {inv_config['hidden_layers']}")
+    print(f"  dropout_rate       = {inv_config['dropout_rate']}")
+    print(f"  learning_rate      = {inv_config['learning_rate']}")
+    print(f"  weight_decay       = {inv_config['weight_decay']}")
+    print(f"  batch_size         = {inv_config['batch_size']}")
+    print(f"  scheduler_factor   = {inv_config['scheduler_factor']}")
+    print(f"  scheduler_patience = {inv_config['scheduler_patience']}")
+    print(f"  loss_mode          = {inv_config['loss_mode']}")
 
     # Train
     inverse_model, history = train_inverse(
