@@ -26,57 +26,10 @@ except ImportError:
     raise ImportError("Optuna is required. Install with: pip install optuna")
 
 # Import shared components
-from model_config import CONFIG, set_seed, load_and_preprocess_data, make_loaders, PermeabilityMLP
-
-# =============================================================================
-# Optuna HPO
-# =============================================================================
-
-class EarlyStopping:
-    """Early stopping on validation loss; stores best weights."""
-    def __init__(self, patience: int, min_delta: float = 0.0):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.best_loss = float("inf")
-        self.best_weights = None
-        self.counter = 0
-
-    def __call__(self, val_loss: float, model: nn.Module) -> bool:
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
-            self.best_weights = deepcopy(model.state_dict())
-            self.counter = 0
-            return False
-        self.counter += 1
-        return self.counter >= self.patience
-
-
-def train_one_epoch(model, loader, criterion, optimizer, device) -> float:
-    model.train()
-    total, n = 0.0, 0
-    for xb, yb in loader:
-        xb, yb = xb.to(device), yb.to(device)
-        optimizer.zero_grad(set_to_none=True)
-        pred = model(xb)
-        loss = criterion(pred, yb)
-        loss.backward()
-        optimizer.step()
-        total += float(loss.item())
-        n += 1
-    return total / max(n, 1)
-
-
-@torch.no_grad()
-def validate(model, loader, criterion, device) -> float:
-    model.eval()
-    total, n = 0.0, 0
-    for xb, yb in loader:
-        xb, yb = xb.to(device), yb.to(device)
-        pred = model(xb)
-        loss = criterion(pred, yb)
-        total += float(loss.item())
-        n += 1
-    return total / max(n, 1)
+from model_config import (
+    CONFIG, set_seed, load_and_preprocess_data, make_loaders,
+    PermeabilityMLP, EarlyStopping, train_one_epoch, validate,
+)
 
 
 @torch.no_grad()
@@ -180,8 +133,11 @@ def run_optuna_hpo(data: dict, config: dict, device: torch.device) -> dict:
         best_metric = float("inf")
         max_epochs = int(config["tune_max_epochs"])
 
+        max_grad_norm = float(config.get("max_grad_norm", 0.0))
+
         for epoch in range(1, max_epochs + 1):
-            _ = train_one_epoch(model, loaders["train_loader"], criterion, optimizer, device)
+            _ = train_one_epoch(model, loaders["train_loader"], criterion, optimizer, device,
+                                max_grad_norm=max_grad_norm)
             val_loss_scaled = validate(model, loaders["val_loader"], criterion, device)
             scheduler.step(val_loss_scaled)
 

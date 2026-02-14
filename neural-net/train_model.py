@@ -24,61 +24,11 @@ from pathlib import Path
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 
 # Import shared components
-from model_config import CONFIG, set_seed, load_and_preprocess_data, make_loaders, PermeabilityMLP
-
-# =============================================================================
-# Training
-# =============================================================================
-
-class EarlyStopping:
-    """Early stopping on validation loss; stores best weights."""
-    def __init__(self, patience: int, min_delta: float = 0.0):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.best_loss = float("inf")
-        self.best_weights = None
-        self.counter = 0
-
-    def __call__(self, val_loss: float, model: nn.Module) -> bool:
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
-            self.best_weights = deepcopy(model.state_dict())
-            self.counter = 0
-            return False
-        self.counter += 1
-        return self.counter >= self.patience
-
-    def restore_best(self, model: nn.Module):
-        if self.best_weights is not None:
-            model.load_state_dict(self.best_weights)
-
-
-def train_one_epoch(model, loader, criterion, optimizer, device) -> float:
-    model.train()
-    total, n = 0.0, 0
-    for xb, yb in loader:
-        xb, yb = xb.to(device), yb.to(device)
-        optimizer.zero_grad(set_to_none=True)
-        pred = model(xb)
-        loss = criterion(pred, yb)
-        loss.backward()
-        optimizer.step()
-        total += float(loss.item())
-        n += 1
-    return total / max(n, 1)
-
-
-@torch.no_grad()
-def validate(model, loader, criterion, device) -> float:
-    model.eval()
-    total, n = 0.0, 0
-    for xb, yb in loader:
-        xb, yb = xb.to(device), yb.to(device)
-        pred = model(xb)
-        loss = criterion(pred, yb)
-        total += float(loss.item())
-        n += 1
-    return total / max(n, 1)
+from model_config import (
+    CONFIG, set_seed, load_and_preprocess_data, make_loaders,
+    PermeabilityMLP, EarlyStopping, train_one_epoch, validate,
+    save_scaler, load_scaler,
+)
 
 
 def build_model(config: dict, n_features: int, n_targets: int) -> nn.Module:
@@ -120,10 +70,12 @@ def train_model(model: nn.Module, loaders: dict, config: dict, device: torch.dev
         min_delta=config["early_stop_min_delta"],
     )
 
+    max_grad_norm = float(config.get("max_grad_norm", 0.0))
     history = {"train_loss": [], "val_loss": [], "lr": []}
 
     for epoch in range(1, config["max_epochs"] + 1):
-        tr = train_one_epoch(model, loaders["train_loader"], criterion, optimizer, device)
+        tr = train_one_epoch(model, loaders["train_loader"], criterion, optimizer, device,
+                             max_grad_norm=max_grad_norm)
         va = validate(model, loaders["val_loader"], criterion, device)
 
         lr = optimizer.param_groups[0]["lr"]
@@ -386,12 +338,12 @@ def main():
     model = build_model(config, data["n_features"], data["n_targets"])
     history = train_model(model, loaders, config, device)
 
-    # Save checkpoint
+    # Save checkpoint (scalers as plain dicts for weights_only=True compatibility)
     torch.save({
         "model_state_dict": model.state_dict(),
         "config": config,
-        "scaler_X": data["scaler_X"],
-        "scaler_Y": data["scaler_Y"],
+        "scaler_X": save_scaler(data["scaler_X"]),
+        "scaler_Y": save_scaler(data["scaler_Y"]),
     }, model_path)
     print(f"\nSaved checkpoint: {model_path}")
 
