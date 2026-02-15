@@ -3,7 +3,7 @@
 Shared Configuration and Utilities
 ==================================
 Contains CONFIG, data loading, model definition, and utilities shared between
-tune_hyperparams.py and train_model.py.
+train_model.py and train_inverse_model.py.
 """
 
 import logging
@@ -77,7 +77,7 @@ CONFIG = {
     "early_stop_min_delta": 1e-8,
     "max_grad_norm": 1.0,
 
-    # Optuna HPO settings (used by tune_hyperparams.py)
+    # Optuna HPO settings (used by train_model.py --tune)
     "optuna_trials": 50,
     "optuna_timeout_sec": None,
     "optuna_seed": 42,
