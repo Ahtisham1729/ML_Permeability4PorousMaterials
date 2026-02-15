@@ -1,0 +1,93 @@
+name: Train ML Models
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "neural-net/**"
+      - "requirements.txt"
+      - ".github/workflows/train.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "neural-net/**"
+      - "requirements.txt"
+      - ".github/workflows/train.yml"
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+jobs:
+  train-forward-model:
+    name: Train Forward Model
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Install CPU-only PyTorch to save CI time/space
+          pip install torch --index-url https://download.pytorch.org/whl/cpu --force-reinstall
+
+      - name: Train forward model
+        working-directory: neural-net
+        run: python train_model.py
+
+      - name: Upload forward model artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: forward-model-output
+          path: neural-net/forward_model_output/
+          retention-days: 30
+
+  train-inverse-model:
+    name: Train Inverse Model
+    needs: train-forward-model
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install torch --index-url https://download.pytorch.org/whl/cpu --force-reinstall
+
+      - name: Download forward model checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: forward-model-output
+          path: neural-net/forward_model_output/
+
+      - name: Train inverse model
+        working-directory: neural-net
+        run: |
+          python train_inverse_model.py \
+            -f forward_model_output/best_model.pt
+
+      - name: Upload inverse model artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: inverse-model-output
+          path: neural-net/inverse_model_output/
+          retention-days: 30
