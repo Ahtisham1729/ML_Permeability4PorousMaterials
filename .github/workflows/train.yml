@@ -81,8 +81,7 @@ jobs:
       - name: Train inverse model
         working-directory: neural-net
         run: |
-          python train_inverse_model.py \
-            -f forward_model_output/best_model.pt
+          python train_inverse_model.py -f diagonal_model.pt --tune
 
       - name: Upload inverse model artifacts
         uses: actions/upload-artifact@v4
