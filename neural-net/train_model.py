@@ -22,6 +22,7 @@ import argparse
 import gc
 import json
 import logging
+import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -217,14 +218,21 @@ def export_results_csv(path: str, sample_names, y_true_phys: np.ndarray, y_pred_
 
 def plot_parity(y_true: np.ndarray, y_pred: np.ndarray, target_names: list[str],
                 plot_path: str, title: str):
-    """Parity plot with log10 scale."""
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+    """Parity plot with log10 scale — one individual file per target."""
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
+        "mathtext.fontset": "cm",
+        "font.size": 20,
+    })
     floor = 1e-300
+    base, ext = os.path.splitext(plot_path)
 
-    for ax, name, i in zip(axes, target_names, range(3)):
+    for name, i in zip(target_names, range(len(target_names))):
         yt = np.log10(np.maximum(y_true[:, i], floor))
         yp = np.log10(np.maximum(y_pred[:, i], floor))
 
+        fig, ax = plt.subplots(figsize=(6, 6))
         ax.scatter(yt, yp, alpha=0.5, s=15, edgecolors="none")
 
         lo = min(yt.min(), yp.min())
@@ -235,43 +243,62 @@ def plot_parity(y_true: np.ndarray, y_pred: np.ndarray, target_names: list[str],
         ax.plot(lims, lims, "k--", lw=1.5, label="1:1")
         ax.set_xlim(lims)
         ax.set_ylim(lims)
-        ax.set_xlabel(f"log10(True {name} [m²])")
-        ax.set_ylabel(f"log10(Pred {name} [m²])")
-        ax.set_title(f"{name} (R²={r2_score(yt, yp):.4f})")
+        ax.set_xlabel(f"log10(True {name} [m²])", fontsize=20)
+        ax.set_ylabel(f"log10(Pred {name} [m²])", fontsize=20)
+        ax.set_title(f"{name} (R²={r2_score(yt, yp):.4f})", fontsize=20)
+        ax.tick_params(labelsize=20)
         ax.grid(True, alpha=0.3)
         ax.set_aspect("equal", adjustable="box")
 
-    plt.suptitle(title, y=1.02, fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(plot_path, dpi=150, bbox_inches="tight", facecolor="white")
-    plt.close()
-    logger.info("Saved parity plot: %s", plot_path)
+        out = f"{base}_{name}{ext}"
+        plt.tight_layout()
+        plt.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close()
+        logger.info("Saved parity plot: %s", out)
 
 
 def plot_training_history(history: dict, output_path: str):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    """Training history — saves loss curves and LR schedule as individual files."""
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
+        "mathtext.fontset": "cm",
+        "font.size": 20,
+    })
+    base, ext = os.path.splitext(output_path)
     epochs = range(1, len(history["train_loss"]) + 1)
 
-    ax1.plot(epochs, history["train_loss"], label="Train", lw=1.5)
-    ax1.plot(epochs, history["val_loss"], label="Val", lw=1.5)
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("MSE (scaled target)")
-    ax1.set_title("Loss Curves")
-    ax1.set_yscale("log")
-    ax1.grid(True, alpha=0.3)
-    ax1.legend()
-
-    ax2.plot(epochs, history["lr"], lw=1.5)
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("LR")
-    ax2.set_title("LR Schedule")
-    ax2.set_yscale("log")
-    ax2.grid(True, alpha=0.3)
-
+    # Loss curves
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(epochs, history["train_loss"], label="Train", lw=1.5)
+    ax.plot(epochs, history["val_loss"], label="Val", lw=1.5)
+    ax.set_xlabel("Epoch", fontsize=20)
+    ax.set_ylabel("MSE (scaled target)", fontsize=20)
+    ax.set_title("Loss Curves", fontsize=20)
+    ax.set_yscale("log")
+    ax.tick_params(labelsize=20)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=20)
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    loss_path = f"{base}_loss{ext}"
+    plt.savefig(loss_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close()
-    logger.info("Saved training history: %s", output_path)
+    logger.info("Saved training history: %s", loss_path)
+
+    # LR schedule
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(epochs, history["lr"], lw=1.5)
+    ax.set_xlabel("Epoch", fontsize=20)
+    ax.set_ylabel("LR", fontsize=20)
+    ax.set_title("LR Schedule", fontsize=20)
+    ax.set_yscale("log")
+    ax.tick_params(labelsize=20)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    lr_path = f"{base}_lr{ext}"
+    plt.savefig(lr_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    logger.info("Saved training history: %s", lr_path)
 
 # =============================================================================
 # Optuna HPO
