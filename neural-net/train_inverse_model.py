@@ -908,7 +908,7 @@ def _plot_k_parity(k_true, k_pred, names, path, title):
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
         "mathtext.fontset": "cm",
-        "font.size": 20,
+        "font.size": 18,
     })
     base, ext = os.path.splitext(path)
 
@@ -924,10 +924,10 @@ def _plot_k_parity(k_true, k_pred, names, path, title):
         ax.plot(lims, lims, "r--", lw=1.5, alpha=0.8)
         ax.set_xlim(lims)
         ax.set_ylim(lims)
-        ax.set_xlabel(f"Target {name}", fontsize=20)
-        ax.set_ylabel(f"Achieved {name}", fontsize=20)
-        ax.set_title(f"{name}", fontsize=20, fontweight="bold")
-        ax.tick_params(labelsize=20)
+        ax.set_xlabel(f"Target {name}", fontsize=18)
+        ax.set_ylabel(f"Achieved {name}", fontsize=18)
+        ax.set_title(f"{name}", fontsize=18, fontweight="bold")
+        ax.tick_params(labelsize=18)
         ax.set_aspect("equal", adjustable="box")
         ax.grid(True, alpha=0.3)
 
@@ -944,7 +944,7 @@ def _plot_parameter_parity(theta_true, theta_pred, names, path, title):
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
         "mathtext.fontset": "cm",
-        "font.size": 20,
+        "font.size": 18,
     })
     base, ext = os.path.splitext(path)
 
@@ -964,10 +964,10 @@ def _plot_parameter_parity(theta_true, theta_pred, names, path, title):
         ax.set_xlim(lims)
         ax.set_ylim(lims)
 
-        ax.set_xlabel("Actual", fontsize=20)
-        ax.set_ylabel("Predicted", fontsize=20)
-        ax.set_title(f"{name} prediction", fontsize=20, fontweight="bold")
-        ax.tick_params(labelsize=20)
+        ax.set_xlabel("Actual", fontsize=18)
+        ax.set_ylabel("Predicted", fontsize=18)
+        ax.set_title(f"{name} prediction", fontsize=18, fontweight="bold")
+        ax.tick_params(labelsize=18)
         ax.grid(True, alpha=0.2)
 
         safe_name = name.replace(" ", "_").replace("/", "_")
@@ -984,7 +984,7 @@ def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
         "mathtext.fontset": "cm",
-        "font.size": 20,
+        "font.size": 18,
     })
     loss_mode = inv_config["loss_mode"]
     reg_label = {
@@ -999,13 +999,13 @@ def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(epochs, history["train_fwd"], label="Train", lw=1.2)
     ax.plot(epochs, history["val_fwd"], label="Val", lw=1.2)
-    ax.set_xlabel("Epoch", fontsize=20)
-    ax.set_ylabel("MSE", fontsize=20)
-    ax.set_title("Forward Consistency", fontsize=20)
+    ax.set_xlabel("Epoch", fontsize=18)
+    ax.set_ylabel("MSE", fontsize=18)
+    ax.set_title("Forward Consistency", fontsize=18)
     ax.set_yscale("log")
-    ax.tick_params(labelsize=20)
+    ax.tick_params(labelsize=18)
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=20)
+    ax.legend(fontsize=18)
     plt.tight_layout()
     fwd_path = f"{base}_fwd_consistency{ext}"
     plt.savefig(fwd_path, dpi=150, bbox_inches="tight", facecolor="white")
@@ -1017,16 +1017,16 @@ def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
     if loss_mode != "fwd_only":
         ax.plot(epochs, history["train_reg"], label="Train", lw=1.2)
         ax.plot(epochs, history["val_reg"], label="Val", lw=1.2)
-        ax.set_title(f"Regularisation: {reg_label}", fontsize=20)
-        ax.legend(fontsize=20)
+        ax.set_title(f"Regularisation: {reg_label}", fontsize=18)
+        ax.legend(fontsize=18)
     else:
         ax.text(0.5, 0.5, "No regularisation\n(fwd_only mode)",
-                ha="center", va="center", fontsize=20, transform=ax.transAxes)
-        ax.set_title("Regularisation", fontsize=20)
-    ax.set_xlabel("Epoch", fontsize=20)
-    ax.set_ylabel("Loss", fontsize=20)
+                ha="center", va="center", fontsize=18, transform=ax.transAxes)
+        ax.set_title("Regularisation", fontsize=18)
+    ax.set_xlabel("Epoch", fontsize=18)
+    ax.set_ylabel("Loss", fontsize=18)
     ax.set_yscale("log")
-    ax.tick_params(labelsize=20)
+    ax.tick_params(labelsize=18)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     reg_path = f"{base}_regularisation{ext}"
@@ -1037,11 +1037,11 @@ def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
     # LR
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(epochs, history["lr"], lw=1.2)
-    ax.set_xlabel("Epoch", fontsize=20)
-    ax.set_ylabel("LR", fontsize=20)
-    ax.set_title("Learning Rate", fontsize=20)
+    ax.set_xlabel("Epoch", fontsize=18)
+    ax.set_ylabel("LR", fontsize=18)
+    ax.set_title("Learning Rate", fontsize=18)
     ax.set_yscale("log")
-    ax.tick_params(labelsize=20)
+    ax.tick_params(labelsize=18)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     lr_path = f"{base}_lr{ext}"
