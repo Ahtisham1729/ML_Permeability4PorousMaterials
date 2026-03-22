@@ -223,7 +223,7 @@ def plot_parity(y_true: np.ndarray, y_pred: np.ndarray, target_names: list[str],
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
         "mathtext.fontset": "cm",
-        "font.size": 20,
+        "font.size": 18,
     })
     floor = 1e-300
     base, ext = os.path.splitext(plot_path)
@@ -243,10 +243,10 @@ def plot_parity(y_true: np.ndarray, y_pred: np.ndarray, target_names: list[str],
         ax.plot(lims, lims, "k--", lw=1.5, label="1:1")
         ax.set_xlim(lims)
         ax.set_ylim(lims)
-        ax.set_xlabel(f"log10(True {name})", fontsize=20)
-        ax.set_ylabel(f"log10(Pred {name})", fontsize=20)
-        ax.set_title(f"{name} (R²={r2_score(yt, yp):.4f})", fontsize=20)
-        ax.tick_params(labelsize=20)
+        ax.set_xlabel(f"log10(True {name})", fontsize=18)
+        ax.set_ylabel(f"log10(Pred {name})", fontsize=18)
+        ax.set_title(f"{name} (R²={r2_score(yt, yp):.4f})", fontsize=18)
+        ax.tick_params(labelsize=18)
         ax.grid(True, alpha=0.3)
         ax.set_aspect("equal", adjustable="box")
 
@@ -263,7 +263,7 @@ def plot_training_history(history: dict, output_path: str):
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
         "mathtext.fontset": "cm",
-        "font.size": 20,
+        "font.size": 18,
     })
     base, ext = os.path.splitext(output_path)
     epochs = range(1, len(history["train_loss"]) + 1)
@@ -272,13 +272,13 @@ def plot_training_history(history: dict, output_path: str):
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(epochs, history["train_loss"], label="Train", lw=1.5)
     ax.plot(epochs, history["val_loss"], label="Val", lw=1.5)
-    ax.set_xlabel("Epoch", fontsize=20)
-    ax.set_ylabel("MSE (scaled target)", fontsize=20)
-    ax.set_title("Loss Curves", fontsize=20)
+    ax.set_xlabel("Epoch", fontsize=18)
+    ax.set_ylabel("MSE (scaled target)", fontsize=18)
+    ax.set_title("Loss Curves", fontsize=18)
     ax.set_yscale("log")
-    ax.tick_params(labelsize=20)
+    ax.tick_params(labelsize=18)
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=20)
+    ax.legend(fontsize=18)
     plt.tight_layout()
     loss_path = f"{base}_loss{ext}"
     plt.savefig(loss_path, dpi=150, bbox_inches="tight", facecolor="white")
@@ -288,11 +288,11 @@ def plot_training_history(history: dict, output_path: str):
     # LR schedule
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(epochs, history["lr"], lw=1.5)
-    ax.set_xlabel("Epoch", fontsize=20)
-    ax.set_ylabel("LR", fontsize=20)
-    ax.set_title("LR Schedule", fontsize=20)
+    ax.set_xlabel("Epoch", fontsize=18)
+    ax.set_ylabel("LR", fontsize=18)
+    ax.set_title("LR Schedule", fontsize=18)
     ax.set_yscale("log")
-    ax.tick_params(labelsize=20)
+    ax.tick_params(labelsize=18)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     lr_path = f"{base}_lr{ext}"
