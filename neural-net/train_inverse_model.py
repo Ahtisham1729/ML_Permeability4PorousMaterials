@@ -939,21 +939,29 @@ def _plot_k_parity(k_true, k_pred, names, path, title):
 
 
 def _plot_parameter_parity(theta_true, theta_pred, names, path, title):
-    """Parameter parity plots — one individual file per design parameter."""
+    """
+    Parameter parity plots — one subplot per design parameter,
+    matching the style of Figure 26 from the reference paper.
+    """
     plt.rcParams.update({
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
         "mathtext.fontset": "cm",
-        "font.size": 18,
+        "font.size": 20,
     })
-    base, ext = os.path.splitext(path)
+    n = len(names)
+    ncols = 3
+    nrows = int(np.ceil(n / ncols))
 
-    for i in range(len(names)):
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4.5 * nrows))
+    axes_flat = axes.flatten()
+
+    for i in range(n):
+        ax = axes_flat[i]
         name = names[i]
         yt = theta_true[:, i]
         yp = theta_pred[:, i]
 
-        fig, ax = plt.subplots(figsize=(6, 6))
         ax.scatter(yt, yp, alpha=0.3, s=10, edgecolors="none", c="steelblue")
 
         lo = min(yt.min(), yp.min())
@@ -964,18 +972,20 @@ def _plot_parameter_parity(theta_true, theta_pred, names, path, title):
         ax.set_xlim(lims)
         ax.set_ylim(lims)
 
-        ax.set_xlabel("Actual", fontsize=18)
-        ax.set_ylabel("Predicted", fontsize=18)
-        ax.set_title(f"{name} prediction", fontsize=18, fontweight="bold")
-        ax.tick_params(labelsize=18)
+        ax.set_xlabel("Actual", fontsize=20)
+        ax.set_ylabel("Predicted", fontsize=20)
+        ax.set_title(f"{name} prediction", fontsize=20, fontweight="bold")
+        ax.tick_params(labelsize=20)
         ax.grid(True, alpha=0.2)
 
-        safe_name = name.replace(" ", "_").replace("/", "_")
-        out = f"{base}_{safe_name}{ext}"
-        plt.tight_layout()
-        plt.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
-        plt.close()
-        logger.info("  Saved: %s", out)
+    for j in range(n, len(axes_flat)):
+        axes_flat[j].set_visible(False)
+
+    plt.suptitle(title, y=1.01, fontsize=20, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    logger.info("  Saved: %s", path)
 
 
 def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
@@ -996,7 +1006,7 @@ def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
     epochs = range(1, len(history["train_fwd"]) + 1)
 
     # Forward consistency
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(epochs, history["train_fwd"], label="Train", lw=1.2)
     ax.plot(epochs, history["val_fwd"], label="Val", lw=1.2)
     ax.set_xlabel("Epoch", fontsize=18)
@@ -1013,7 +1023,7 @@ def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
     logger.info("Saved: %s", fwd_path)
 
     # Regularisation term
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, ax = plt.subplots(figsize=(10, 6))
     if loss_mode != "fwd_only":
         ax.plot(epochs, history["train_reg"], label="Train", lw=1.2)
         ax.plot(epochs, history["val_reg"], label="Val", lw=1.2)
@@ -1035,7 +1045,7 @@ def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
     logger.info("Saved: %s", reg_path)
 
     # LR
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(epochs, history["lr"], lw=1.2)
     ax.set_xlabel("Epoch", fontsize=18)
     ax.set_ylabel("LR", fontsize=18)
