@@ -44,6 +44,7 @@ import argparse
 import gc
 import json
 import logging
+import os
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -902,57 +903,59 @@ def evaluate_inverse(inverse_model: nn.Module, prep: dict, inv_config: dict,
 # =============================================================================
 
 def _plot_k_parity(k_true, k_pred, names, path, title):
-    """Parity plot for permeability in log10 space."""
-    fig, axes = plt.subplots(1, len(names), figsize=(5 * len(names), 4.5))
-    if len(names) == 1:
-        axes = [axes]
+    """Parity plot for permeability in log10 space — one file per component."""
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
+        "mathtext.fontset": "cm",
+        "font.size": 20,
+    })
+    base, ext = os.path.splitext(path)
 
-    for ax, name, i in zip(axes, names, range(len(names))):
+    for name, i in zip(names, range(len(names))):
         yt = np.log10(np.maximum(k_true[:, i], 1e-30))
         yp = np.log10(np.maximum(k_pred[:, i], 1e-30))
+
+        fig, ax = plt.subplots(figsize=(6, 6))
         ax.scatter(yt, yp, alpha=0.4, s=12, edgecolors="none")
         lo, hi = min(yt.min(), yp.min()), max(yt.max(), yp.max())
         pad = 0.05 * (hi - lo + 1e-12)
         lims = [lo - pad, hi + pad]
         ax.plot(lims, lims, "r--", lw=1.5, alpha=0.8)
-        ax.set_xlim(lims); ax.set_ylim(lims)
-        ax.set_xlabel(f"Target {name}")
-        ax.set_ylabel(f"Achieved {name}")
-        ax.set_title(f"{name}", fontweight="bold")
+        ax.set_xlim(lims)
+        ax.set_ylim(lims)
+        ax.set_xlabel(f"Target {name}", fontsize=20)
+        ax.set_ylabel(f"Achieved {name}", fontsize=20)
+        ax.set_title(f"{name}", fontsize=20, fontweight="bold")
+        ax.tick_params(labelsize=20)
         ax.set_aspect("equal", adjustable="box")
         ax.grid(True, alpha=0.3)
 
-    plt.suptitle(title, y=1.02, fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
-    plt.close()
-    logger.info("  Saved: %s", path)
+        out = f"{base}_{name}{ext}"
+        plt.tight_layout()
+        plt.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close()
+        logger.info("  Saved: %s", out)
 
 
 def _plot_parameter_parity(theta_true, theta_pred, names, path, title):
-    """
-    Parameter parity plots — one subplot per design parameter,
-    matching the style of Figure 26 from the reference paper.
+    """Parameter parity plots — one individual file per design parameter."""
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
+        "mathtext.fontset": "cm",
+        "font.size": 20,
+    })
+    base, ext = os.path.splitext(path)
 
-    Layout adapts to number of parameters (e.g. 3×3 for 8 params).
-    Each subplot shows actual vs predicted with 1:1 reference line.
-    """
-    n = len(names)
-    ncols = 3
-    nrows = int(np.ceil(n / ncols))
-
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4.5 * nrows))
-    axes_flat = axes.flatten()
-
-    for i in range(n):
-        ax = axes_flat[i]
+    for i in range(len(names)):
         name = names[i]
         yt = theta_true[:, i]
         yp = theta_pred[:, i]
 
+        fig, ax = plt.subplots(figsize=(6, 6))
         ax.scatter(yt, yp, alpha=0.3, s=10, edgecolors="none", c="steelblue")
 
-        # 1:1 reference line
         lo = min(yt.min(), yp.min())
         hi = max(yt.max(), yp.max())
         pad = 0.05 * (hi - lo + 1e-12)
@@ -961,65 +964,90 @@ def _plot_parameter_parity(theta_true, theta_pred, names, path, title):
         ax.set_xlim(lims)
         ax.set_ylim(lims)
 
-        ax.set_xlabel("Actual")
-        ax.set_ylabel("Predicted")
-        ax.set_title(f"{name} prediction", fontsize=11, fontweight="bold")
+        ax.set_xlabel("Actual", fontsize=20)
+        ax.set_ylabel("Predicted", fontsize=20)
+        ax.set_title(f"{name} prediction", fontsize=20, fontweight="bold")
+        ax.tick_params(labelsize=20)
         ax.grid(True, alpha=0.2)
 
-    # Hide unused subplots
-    for j in range(n, len(axes_flat)):
-        axes_flat[j].set_visible(False)
-
-    plt.suptitle(title, y=1.01, fontsize=13, fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
-    plt.close()
-    logger.info("  Saved: %s", path)
+        safe_name = name.replace(" ", "_").replace("/", "_")
+        out = f"{base}_{safe_name}{ext}"
+        plt.tight_layout()
+        plt.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close()
+        logger.info("  Saved: %s", out)
 
 
 def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
-    """Plot training curves."""
+    """Plot training curves — saves each curve as an individual file."""
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
+        "mathtext.fontset": "cm",
+        "font.size": 20,
+    })
     loss_mode = inv_config["loss_mode"]
     reg_label = {
         "geometry": "||Inv(K) − θ_true||²",
         "bounding": "L_bound",
         "fwd_only": "N/A",
     }[loss_mode]
-
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+    base, ext = os.path.splitext(output_path)
     epochs = range(1, len(history["train_fwd"]) + 1)
 
     # Forward consistency
-    axes[0].plot(epochs, history["train_fwd"], label="Train", lw=1.2)
-    axes[0].plot(epochs, history["val_fwd"], label="Val", lw=1.2)
-    axes[0].set_xlabel("Epoch"); axes[0].set_ylabel("MSE")
-    axes[0].set_title("Forward Consistency ||FNN(Inv(K)) − K||²")
-    axes[0].set_yscale("log"); axes[0].grid(True, alpha=0.3); axes[0].legend()
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(epochs, history["train_fwd"], label="Train", lw=1.2)
+    ax.plot(epochs, history["val_fwd"], label="Val", lw=1.2)
+    ax.set_xlabel("Epoch", fontsize=20)
+    ax.set_ylabel("MSE", fontsize=20)
+    ax.set_title("Forward Consistency", fontsize=20)
+    ax.set_yscale("log")
+    ax.tick_params(labelsize=20)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=20)
+    plt.tight_layout()
+    fwd_path = f"{base}_fwd_consistency{ext}"
+    plt.savefig(fwd_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    logger.info("Saved: %s", fwd_path)
 
     # Regularisation term
+    fig, ax = plt.subplots(figsize=(7, 5))
     if loss_mode != "fwd_only":
-        axes[1].plot(epochs, history["train_reg"], label="Train", lw=1.2)
-        axes[1].plot(epochs, history["val_reg"], label="Val", lw=1.2)
-        axes[1].set_title(f"Regularisation: {reg_label}")
-        axes[1].legend()
+        ax.plot(epochs, history["train_reg"], label="Train", lw=1.2)
+        ax.plot(epochs, history["val_reg"], label="Val", lw=1.2)
+        ax.set_title(f"Regularisation: {reg_label}", fontsize=20)
+        ax.legend(fontsize=20)
     else:
-        axes[1].text(0.5, 0.5, "No regularisation\n(fwd_only mode)",
-                     ha="center", va="center", fontsize=12, transform=axes[1].transAxes)
-        axes[1].set_title("Regularisation")
-    axes[1].set_xlabel("Epoch"); axes[1].set_ylabel("Loss")
-    axes[1].set_yscale("log"); axes[1].grid(True, alpha=0.3)
+        ax.text(0.5, 0.5, "No regularisation\n(fwd_only mode)",
+                ha="center", va="center", fontsize=20, transform=ax.transAxes)
+        ax.set_title("Regularisation", fontsize=20)
+    ax.set_xlabel("Epoch", fontsize=20)
+    ax.set_ylabel("Loss", fontsize=20)
+    ax.set_yscale("log")
+    ax.tick_params(labelsize=20)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    reg_path = f"{base}_regularisation{ext}"
+    plt.savefig(reg_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    logger.info("Saved: %s", reg_path)
 
     # LR
-    axes[2].plot(epochs, history["lr"], lw=1.2)
-    axes[2].set_xlabel("Epoch"); axes[2].set_ylabel("LR")
-    axes[2].set_title("Learning Rate")
-    axes[2].set_yscale("log"); axes[2].grid(True, alpha=0.3)
-
-    plt.suptitle(f"Training History — {loss_mode} loss", y=1.02, fontweight="bold")
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(epochs, history["lr"], lw=1.2)
+    ax.set_xlabel("Epoch", fontsize=20)
+    ax.set_ylabel("LR", fontsize=20)
+    ax.set_title("Learning Rate", fontsize=20)
+    ax.set_yscale("log")
+    ax.tick_params(labelsize=20)
+    ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    lr_path = f"{base}_lr{ext}"
+    plt.savefig(lr_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close()
-    logger.info("Saved: %s", output_path)
+    logger.info("Saved: %s", lr_path)
 
 
 # =============================================================================
