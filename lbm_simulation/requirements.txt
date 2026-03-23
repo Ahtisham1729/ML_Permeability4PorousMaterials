@@ -1,0 +1,10 @@
+lbmpy[gpu]
+cython
+matplotlib
+pystencils
+scikit-image
+h5py
+numpy
+imageio
+IPython
+ipywidgets
