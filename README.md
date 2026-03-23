@@ -77,8 +77,7 @@ The file `neural-net/256-final.csv` contains **12,911 samples** with 46 columns.
 
 | Column | Description |
 |--------|-------------|
-| `a20`, `a11`, `a02`, `a10`, `a01`, `a00` | Morphological descriptors (Minkowski functionals) |
-| `m` | Microstructure parameter |
+| `a20`, `a11`, `a02`, `a10`, `a01`, `a00`, `m` | Curvatubes microstructure generation parameters |
 | `porosity` | Volume fraction of fluid phase |
 | `tortuosity_geometric_x`, `_y`, `_z` | Geometric tortuosity in each direction |
 
