@@ -49,6 +49,7 @@ logger = logging.getLogger("permeability")
 
 
 def build_model(config: dict, n_features: int, n_targets: int) -> nn.Module:
+    """Create the forward MLP and log its architecture summary."""
     model = PermeabilityMLP(
         n_inputs=n_features,
         n_outputs=n_targets,
@@ -63,6 +64,7 @@ def build_model(config: dict, n_features: int, n_targets: int) -> nn.Module:
 
 
 def train_model(model: nn.Module, loaders: dict, config: dict, device: torch.device) -> dict:
+    """Train the forward model with AdamW, LR scheduling, and early stopping."""
     logger.info("=" * 60)
     logger.info("TRAINING")
     logger.info("=" * 60)
@@ -70,18 +72,21 @@ def train_model(model: nn.Module, loaders: dict, config: dict, device: torch.dev
     model = model.to(device)
     criterion = nn.MSELoss()
 
+    # AdamW optimizer with decoupled weight decay (L2 regularization)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config["learning_rate"],
         weight_decay=config["weight_decay"],
     )
 
+    # Reduce LR when validation loss plateaus
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min",
         factor=config["scheduler_factor"],
         patience=config["scheduler_patience"],
     )
 
+    # Stop training if no improvement for `patience` epochs
     early_stop = EarlyStopping(
         patience=config["early_stop_patience"],
         min_delta=config["early_stop_min_delta"],
@@ -188,7 +193,7 @@ def print_metrics_block(title: str, target_names: list[str], m: dict, physical: 
 
 @torch.no_grad()
 def predict(model: nn.Module, X_scaled: np.ndarray, scaler_Y, config: dict, device: torch.device):
-    """Predict and convert to physical K."""
+    """Run model inference and convert scaled predictions back to physical permeability."""
     model.eval()
     X_t = torch.from_numpy(X_scaled.astype(np.float32)).to(device)
     y_scaled = model(X_t).cpu().numpy()
@@ -218,7 +223,7 @@ def export_results_csv(path: str, sample_names, y_true_phys: np.ndarray, y_pred_
 
 def plot_parity(y_true: np.ndarray, y_pred: np.ndarray, target_names: list[str],
                 plot_path: str, title: str):
-    """Parity plot with log10 scale — one individual file per target."""
+    """Create true-vs-predicted scatter plots in log10 space, one file per K component."""
     plt.rcParams.update({
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
@@ -258,7 +263,7 @@ def plot_parity(y_true: np.ndarray, y_pred: np.ndarray, target_names: list[str],
 
 
 def plot_training_history(history: dict, output_path: str):
-    """Training history — saves loss curves and LR schedule as individual files."""
+    """Save train/val loss curves and LR schedule as separate image files."""
     plt.rcParams.update({
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
@@ -316,7 +321,7 @@ def val_mae_modelspace(model: nn.Module, X_val_scaled: np.ndarray, Y_val_model: 
 
 
 def suggest_hidden_layers(trial) -> list[int]:
-    """Sample a monotone (optionally decaying) width schedule."""
+    """Suggest a hidden layer width schedule that optionally decays from base width."""
     n_layers = trial.suggest_int("n_layers", 2, 6)
     hidden_base = trial.suggest_int("hidden_base", 64, 1024, step=64)
     width_decay = trial.suggest_float("width_decay", 0.6, 1.0)
@@ -547,7 +552,7 @@ def main():
     if device.type == "cuda":
         logger.info("  GPU: %s", torch.cuda.get_device_name(0))
 
-    # Load config (with tuned params if provided)
+    # Load hyperparameters: from JSON file, Optuna results, or defaults
     if args.params:
         logger.info("Loading parameters from: %s", args.params)
         config = load_params_from_json(args.params, CONFIG)
@@ -561,7 +566,7 @@ def main():
     # Load and preprocess data
     data = load_and_preprocess_data(config)
 
-    # --- Optuna HPO (if requested) ---
+    # Run hyperparameter optimization if requested, then optionally train
     if args.tune or args.tune_only:
         hpo_result = run_optuna_hpo(data, config, device)
 
@@ -605,7 +610,7 @@ def main():
     model = build_model(config, data["n_features"], data["n_targets"])
     history = train_model(model, loaders, config, device)
 
-    # Save checkpoint (scalers as plain dicts for weights_only=True compatibility)
+    # Save model weights, config, and scalers together for reproducible inference
     torch.save({
         "model_state_dict": model.state_dict(),
         "config": config,
@@ -614,7 +619,7 @@ def main():
     }, model_path)
     logger.info("Saved checkpoint: %s", model_path)
 
-    # Predictions
+    # Generate predictions on validation and held-out test sets
     y_val_pred_m, y_val_pred_k = predict(model, data["X_val_scaled"], data["scaler_Y"], config, device)
     y_test_pred_m, y_test_pred_k = predict(model, data["X_test_scaled"], data["scaler_Y"], config, device)
 
@@ -623,7 +628,7 @@ def main():
     y_val_true_m = data["Y_val_model"]
     y_test_true_m = data["Y_test_model"]
 
-    # Metrics
+    # Compute and log metrics in both physical K space and model (log10) space
     targets = config["target_cols"]
 
     m_val_phys = compute_metrics(y_val_true_k, y_val_pred_k, physical=True)
