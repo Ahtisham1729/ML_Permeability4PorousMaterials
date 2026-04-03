@@ -97,8 +97,9 @@ class InverseMLP(nn.Module):
         super().__init__()
 
         if hidden_layers is None:
-            hidden_layers = [256, 512, 512, 512, 256]
+            hidden_layers = [256, 512, 512, 512, 256]  # Symmetric encoder-decoder style
 
+        # Build hidden layers with LayerNorm for stability (inverse mapping is harder)
         layers = []
         prev = n_inputs
         for h in hidden_layers:
@@ -115,12 +116,13 @@ class InverseMLP(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
+        """Kaiming init for hidden layers; small Xavier init for the output layer."""
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-        # Small init for final layer
+        # Use small output weights to start predictions near zero (scaled space center)
         final = [m for m in self.modules() if isinstance(m, nn.Linear)][-1]
         nn.init.xavier_uniform_(final.weight, gain=0.1)
         nn.init.zeros_(final.bias)
@@ -160,42 +162,42 @@ def bounding_loss(theta_pred: torch.Tensor,
 # =============================================================================
 
 INVERSE_CONFIG = {
-    # Architecture
-    "hidden_layers": [256, 512, 512, 512, 256],
+    # --- Architecture ---
+    "hidden_layers": [256, 512, 512, 512, 256],  # Symmetric encoder-decoder
     "dropout_rate": 0.1,
 
-    # Design parameters (reported/exported) vs auxiliary (predicted internally only)
+    # Design parameters are exported; auxiliary ones are only used internally for loss
     "design_param_cols": ["a20", "a11", "a02", "a10", "a01", "a00", "m", "porosity"],
     "auxiliary_cols": ["tortuosity_geometric_x", "tortuosity_geometric_y", "tortuosity_geometric_z"],
 
-    # Training
+    # --- Training ---
     "batch_size": 128,
     "max_epochs": 1000,
     "learning_rate": 1e-4,
     "weight_decay": 1e-5,
 
-    # Scheduler
-    "scheduler_factor": 0.5,
-    "scheduler_patience": 30,
+    # --- LR scheduling ---
+    "scheduler_factor": 0.5,        # LR reduction factor on plateau
+    "scheduler_patience": 30,       # Epochs before reducing LR
 
-    # Early stopping
+    # --- Early stopping ---
     "early_stop_patience": 100,
     "early_stop_min_delta": 1e-8,
     "max_grad_norm": 1.0,
 
-    # Loss mode: "geometry", "bounding", or "fwd_only"
-    "loss_mode": "geometry",
+    # --- Loss configuration ---
+    "loss_mode": "geometry",        # Options: "geometry", "bounding", "fwd_only"
 
-    # Weights for geometry mode:  L = w_fwd * L_fwd + w_param * L_geo
-    "w_forward_consistency": 1.0,
-    "w_parameter_recon": 0.1,
+    # Geometry mode weights: L = w_fwd * L_fwd + w_param * L_geo
+    "w_forward_consistency": 1.0,   # Weight for forward consistency term
+    "w_parameter_recon": 0.1,       # Weight for direct feature reconstruction term
 
-    # Weight for bounding mode:  L = L_fwd + w_bounding * L_bound
+    # Bounding mode weights: L = L_fwd + w_bounding * L_bound
     "w_bounding": 1.0,
-    "bound_margin": 0.0,  # expand bounds by this fraction (0 = exact data range)
+    "bound_margin": 0.0,            # Expand parameter bounds by this fraction (0 = exact)
 
-    # Saving
-    "save_every": 20,
+    # --- Checkpointing ---
+    "save_every": 20,               # Save intermediate checkpoint every N epochs
     "output_dir": "inverse_model_output",
 }
 
@@ -206,14 +208,15 @@ INVERSE_CONFIG = {
 
 def prepare_inverse_data(forward_checkpoint_path: str, device: torch.device):
     """
-    Load data using the same pipeline as forward training, then reorganise
-    for inverse training:  K (targets) become inputs, features become outputs.
+    Load and prepare data for inverse training. Reuses the forward model's
+    data pipeline but swaps inputs/outputs: K becomes input, features become output.
+    Also loads the frozen forward model for computing consistency loss.
     """
     logger.info("=" * 60)
     logger.info("DATA PREPARATION (reusing forward model pipeline)")
     logger.info("=" * 60)
 
-    # Load forward checkpoint
+    # Load forward model checkpoint to get its config, weights, and fitted scalers
     checkpoint = torch.load(forward_checkpoint_path, map_location=device, weights_only=True)
     fwd_config = checkpoint["config"]
     scaler_X = load_scaler(checkpoint["scaler_X"])
@@ -229,7 +232,7 @@ def prepare_inverse_data(forward_checkpoint_path: str, device: torch.device):
     n_features = data["n_features"]
     n_targets = data["n_targets"]
 
-    # Build and load forward model (frozen)
+    # Rebuild the forward model and freeze all parameters (used in loss, not trained)
     forward_model = PermeabilityMLP(
         n_inputs=n_features,
         n_outputs=n_targets,
@@ -245,7 +248,7 @@ def prepare_inverse_data(forward_checkpoint_path: str, device: torch.device):
     n_params = sum(p.numel() for p in forward_model.parameters())
     logger.info("Forward model loaded: %s parameters (frozen)", f"{n_params:,}")
 
-    # Prepare tensors
+    # Convert scaled arrays to GPU tensors for training
     dtype = torch.float32
 
     k_train = torch.tensor(data["Y_train_scaled"], dtype=dtype, device=device)
@@ -257,7 +260,7 @@ def prepare_inverse_data(forward_checkpoint_path: str, device: torch.device):
     k_test = torch.tensor(data["Y_test_scaled"], dtype=dtype, device=device)
     theta_test = torch.tensor(data["X_test_scaled"], dtype=dtype, device=device)
 
-    # Compute parameter bounds from training data (for bounding loss)
+    # Compute per-feature min/max from training data (used by bounding loss mode)
     theta_min = theta_train.min(dim=0).values
     theta_max = theta_train.max(dim=0).values
 
@@ -581,7 +584,7 @@ def load_inverse_params_from_json(path: str, base_config: dict) -> dict:
 
 def train_inverse(inv_config: dict, prep: dict, device: torch.device,
                   resume_path: str = None):
-    """Train the inverse model."""
+    """Train the inverse model with the selected loss mode (geometry/bounding/fwd_only)."""
 
     logger.info("=" * 60)
     logger.info("INVERSE MODEL TRAINING")
@@ -598,7 +601,7 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
     n_features = prep["n_features"]
     n_targets = prep["n_targets"]
 
-    # Bounding loss bounds (with optional margin)
+    # Optionally expand parameter bounds by a margin to allow slight extrapolation
     margin = inv_config.get("bound_margin", 0.0)
     theta_range = prep["theta_max"] - prep["theta_min"]
     theta_min_b = prep["theta_min"] - margin * theta_range
@@ -682,14 +685,16 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
 
     for epoch in range(1, inv_config["max_epochs"] + 1):
 
-        # --- Train ---
+        # --- Train: predict features, pass through frozen forward model, compute loss ---
         inverse_model.train()
         for k_batch, theta_batch in loader:
             optimizer.zero_grad(set_to_none=True)
 
+            # Inverse: K → predicted features; Forward: predicted features → reconstructed K
             theta_pred = inverse_model(k_batch)
             k_recon = forward_model(theta_pred)
 
+            # Forward consistency: how well does the round-trip K match the input K?
             loss_fwd = torch.mean((k_recon - k_batch) ** 2)
 
             if loss_mode == "geometry":
@@ -707,7 +712,7 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
                 nn.utils.clip_grad_norm_(inverse_model.parameters(), max_grad_norm)
             optimizer.step()
 
-        # --- Evaluate (train + val only; test is held out until after training) ---
+        # --- Evaluate on train and val sets (test is held out until final evaluation) ---
         inverse_model.eval()
         with torch.no_grad():
             # Train
@@ -776,7 +781,7 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
     early_stop.restore_best(inverse_model)
     logger.info("Restored best weights | best val=%s", f"{early_stop.best_loss:.6e}")
 
-    # Save final (scalers as plain dicts for weights_only=True compatibility)
+    # Save best inverse model with both forward and inverse configs for standalone inference
     torch.save({
         "model_state_dict": inverse_model.state_dict(),
         "inv_config": inv_config,
@@ -794,7 +799,7 @@ def train_inverse(inv_config: dict, prep: dict, device: torch.device,
 # =============================================================================
 
 def to_physical_K(k_scaled: np.ndarray, scaler_Y, use_log: bool) -> np.ndarray:
-    """Convert scaled K back to physical units."""
+    """Undo MinMax scaling and log10 transform to get permeability in physical units."""
     k_model = scaler_Y.inverse_transform(k_scaled)
     if use_log:
         return np.power(10.0, k_model)
@@ -903,7 +908,7 @@ def evaluate_inverse(inverse_model: nn.Module, prep: dict, inv_config: dict,
 # =============================================================================
 
 def _plot_k_parity(k_true, k_pred, names, path, title):
-    """Parity plot for permeability in log10 space — one file per component."""
+    """Target vs achieved permeability scatter plots in log10 space."""
     plt.rcParams.update({
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
@@ -939,10 +944,7 @@ def _plot_k_parity(k_true, k_pred, names, path, title):
 
 
 def _plot_parameter_parity(theta_true, theta_pred, names, path, title):
-    """
-    Parameter parity plots — one subplot per design parameter,
-    matching the style of Figure 26 from the reference paper.
-    """
+    """True vs predicted design parameter subplots (one per parameter)."""
     plt.rcParams.update({
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
@@ -989,7 +991,7 @@ def _plot_parameter_parity(theta_true, theta_pred, names, path, title):
 
 
 def plot_inverse_history(history: dict, inv_config: dict, output_path: str):
-    """Plot training curves — saves each curve as an individual file."""
+    """Save forward consistency, regularization, and LR curves as separate images."""
     plt.rcParams.update({
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
@@ -1156,7 +1158,7 @@ def inverse_design_from_checkpoint(checkpoint_path: str, k_target_physical: np.n
     k_log = np.log10(k_arr + 1e-20) if use_log else k_arr
     k_scaled = scaler_Y.transform(k_log)
 
-    # OOD check: warn if any scaled values fall outside [0, 1] (training range)
+    # Warn if target K falls outside the training distribution (predictions may be unreliable)
     logger = logging.getLogger("permeability")
     ood_low = k_scaled < -0.05
     ood_high = k_scaled > 1.05

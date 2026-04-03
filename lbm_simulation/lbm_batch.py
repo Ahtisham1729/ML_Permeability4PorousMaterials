@@ -10,37 +10,38 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-# lbmpy imports
+# LBM solver library for fluid simulation on lattice grids
 from lbmpy.session import *
 from lbmpy.methods import create_trt_with_magic_number
 from pystencils import Target
 
 # ============== CONFIGURATION ==============
-USE_GPU = True
-USE_SINGLE_PRECISION = False
-GPU_BLOCK_SIZE = (128, 1, 1)
+USE_GPU = True                  # Use GPU acceleration (CUDA)
+USE_SINGLE_PRECISION = False    # Use float64 for better accuracy
+GPU_BLOCK_SIZE = (128, 1, 1)    # CUDA thread block dimensions
 
-# Default Directories (Override with arguments)
+# Default directories (override via CLI arguments)
 INPUT_DIR = ""
 OUTPUT_DIR = ""
 
-# Geometry settings
-DATASET_NAME = "scalar_value"
-SOLID_VALUE = 1
-BODY_FORCE = 1e-5
+# Geometry and simulation settings
+DATASET_NAME = "scalar_value"   # HDF5 dataset name for the voxel grid
+SOLID_VALUE = 1                 # Voxel value representing solid phase
+BODY_FORCE = 1e-5               # External force magnitude driving the flow
 # ===========================================
 
 
 def load_geometry_from_file(path, flip=False, dataset_name="scalar_value", solid_value=1):
-    """Load geometry from HDF5 file without downsampling."""
+    """Load a 3D binary voxel grid from an HDF5 file."""
     with h5py.File(path, 'r') as file:
         if dataset_name not in file:
             raise KeyError(f"Dataset '{dataset_name}' not found")
         raw = file[dataset_name][:]
 
-    # Convert to binary mask (1=solid, 0=fluid)
+    # Convert raw values to binary mask: 1 = solid, 0 = fluid (pore)
     array = (raw == solid_value).astype(np.uint8)
 
+    # Optionally flip along the last axis (used to match expected orientation)
     if flip:
         array = np.flip(array, axis=-1)
 
@@ -49,24 +50,24 @@ def load_geometry_from_file(path, flip=False, dataset_name="scalar_value", solid
 
 def run_single_direction(geometry, domain_size, force_direction, force_magnitude,
                          use_gpu=True, use_single_precision=False):
-    """Core simulation logic for one direction using TRT method."""
+    """Run LBM simulation for a single force direction (x=0, y=1, or z=2)."""
+    # Set body force vector: nonzero only in the chosen direction
     force = [0.0, 0.0, 0.0]
     force[force_direction] = force_magnitude
     force = tuple(force)
 
-    # Kinematic viscosity
+    # Kinematic viscosity (lattice units)
     nu = 1/6
 
-    # Calculate omega_plus from viscosity
+    # Compute TRT relaxation rates from viscosity using the magic number
+    # tau_plus controls viscosity; tau_minus is set for optimal stability
     tau_plus = 3 * nu + 0.5
     omega_plus = 1.0 / tau_plus
     magic_lambda = 3/16
     tau_minus = magic_lambda / (tau_plus - 0.5) + 0.5
     omega_minus = 1.0 / tau_minus
 
-    # ========================================
-    # Step 3: Create config
-    # ========================================
+    # Configure the LBM solver: D3Q19 stencil with TRT collision and Guo forcing
     lbm_config = LBMConfig(
         stencil=LBStencil(Stencil.D3Q19),
         method=Method.TRT,
@@ -75,6 +76,7 @@ def run_single_direction(geometry, domain_size, force_direction, force_magnitude
         force_model=ForceModel.GUO,
     )
 
+    # Select compute target (GPU or CPU) and set precision
     target = Target.GPU if use_gpu else Target.CPU
     config = CreateKernelConfig(
         target=target,
@@ -82,6 +84,7 @@ def run_single_direction(geometry, domain_size, force_direction, force_magnitude
         default_number_float="float32" if use_single_precision else "float64",
     )
 
+    # Create simulation with fully periodic boundaries (no inlet/outlet walls)
     simulation = LatticeBoltzmannStep(
         domain_size=domain_size,
         periodicity=(True, True, True),
@@ -89,10 +92,11 @@ def run_single_direction(geometry, domain_size, force_direction, force_magnitude
         config=config
     )
 
-    # Boundary Conditions
+    # Apply no-slip boundary condition on all solid voxels
     solid_bc = NoSlip(name="solid")
     mask = geometry.astype(bool)
 
+    # Callback maps each lattice node to solid/fluid based on the geometry mask
     def geometry_callback(x, y, z):
         x_idx = np.floor(x).astype(int) % domain_size[0]
         y_idx = np.floor(y).astype(int) % domain_size[1]
@@ -106,7 +110,7 @@ def run_single_direction(geometry, domain_size, force_direction, force_magnitude
         inner_ghost_layers=True,
     )
 
-    # Main Loop
+    # Iterative simulation loop: run in chunks of 5000 steps, check convergence
     u_old = None
     stime = time.time()
     expected_shape = (*domain_size, 3)
@@ -115,18 +119,21 @@ def run_single_direction(geometry, domain_size, force_direction, force_magnitude
     final_iter = 0
 
     try:
-        abs_tol = 1e-10       # Absolute change threshold
-        rel_tol = 1e-6        # Relative change threshold
-        for i in range(30):
+        abs_tol = 1e-10       # Stop if absolute velocity change is tiny
+        rel_tol = 1e-6        # Stop if relative velocity change is tiny
+        for i in range(30):   # Max 30 chunks = 150,000 iterations
             simulation.run(5000)
 
+            # Extract velocity field from the simulation
             u_current = np.array(simulation.velocity[:, :, :])
             if u_current.ndim == 4 and u_current.shape[1] == 1:
                 u_current = u_current.reshape(expected_shape)
 
+            # Abort if simulation became numerically unstable
             if np.any(np.isnan(u_current)) or np.any(np.isinf(u_current)):
                 return None
 
+            # Compute convergence: relative change in velocity between chunks
             if u_old is not None:
                 numerator = np.sqrt(
                     np.sum(np.square(u_current - u_old)[fluid_mask]))
@@ -139,12 +146,12 @@ def run_single_direction(geometry, domain_size, force_direction, force_magnitude
 
             final_iter = i
 
-            # Convergence check: relative OR absolute OR plateau
+            # Converged if relative or absolute change is below threshold
             if epsilon < rel_tol or numerator < abs_tol:
                 converged = True
                 break
 
-            # Early divergence check
+            # Abort early if still far from convergence after 50k iterations
             if i > 9 and epsilon > 1e-2:
                 return None
 
@@ -152,6 +159,7 @@ def run_single_direction(geometry, domain_size, force_direction, force_magnitude
 
         total_time = time.time() - stime
 
+        # Compute mean fluid velocities in each direction (used for Darcy's law)
         u_x_mean = np.mean(u_current[..., 0][fluid_mask])
         u_y_mean = np.mean(u_current[..., 1][fluid_mask])
         u_z_mean = np.mean(u_current[..., 2][fluid_mask])
@@ -163,19 +171,20 @@ def run_single_direction(geometry, domain_size, force_direction, force_magnitude
         }
 
     finally:
-        # Crucial for batch processing: release GPU memory
+        # Release GPU memory so the next simulation can allocate fresh resources
         del simulation
         gc.collect()
 
 
 def simulate_full_tensor(geometry, domain_size, sample_name, force_magnitude=1e-5,
                          use_gpu=True, use_single_precision=False):
+    """Compute the full 3x3 permeability tensor by running LBM in x, y, z directions."""
     mask = geometry.astype(bool)
-    porosity = np.mean(~mask)
+    porosity = np.mean(~mask)  # Fraction of fluid voxels
 
     results_by_direction = {}
 
-    # Run X, Y, Z directions
+    # Run separate simulations with force applied in each direction
     for direction in range(3):
         result = run_single_direction(geometry, domain_size, direction, force_magnitude,
                                       use_gpu, use_single_precision)
@@ -186,17 +195,18 @@ def simulate_full_tensor(geometry, domain_size, sample_name, force_magnitude=1e-
     nu = results_by_direction[0]['nu']
     K_star = np.zeros((3, 3))
 
-    # Construct Tensor
+    # Build the permeability tensor K* from Darcy's law: K*_ij = u_i * nu / F_j
+    # Each column j corresponds to a simulation with force in direction j
     for j in range(3):
         res = results_by_direction[j]
         K_star[0, j] = res['u_x'] * nu / force_magnitude
         K_star[1, j] = res['u_y'] * nu / force_magnitude
         K_star[2, j] = res['u_z'] * nu / force_magnitude
 
-    # Darcy Permeability
+    # Scale by porosity to get the Darcy permeability tensor
     K = K_star * porosity
 
-    # Eigenanalysis
+    # Compute eigenvalues for characterizing anisotropy, and check tensor symmetry
     eigenvalues_K_star = np.linalg.eigvalsh(K_star)
     eigenvalues_K = np.linalg.eigvalsh(K)
     symmetry_error = np.linalg.norm(
@@ -227,7 +237,7 @@ def simulate_full_tensor(geometry, domain_size, sample_name, force_magnitude=1e-
 
 
 def create_error_result(sample_name, error_type, error_message):
-    """Create an error result dictionary with all fields matching successful results."""
+    """Create a placeholder result with None values for failed simulations."""
     return {
         'sample_name': sample_name,
         'porosity': None,
@@ -254,11 +264,11 @@ def create_error_result(sample_name, error_type, error_message):
 
 
 def save_results_to_csv(results_list, output_path):
+    """Write simulation results to CSV. Each parallel task writes its own file."""
     if not results_list:
         return
     fieldnames = list(results_list[0].keys())
 
-    # 'w' mode overwrites, assuming each sample has its own file in parallel mode
     with open(output_path, 'w', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
@@ -267,7 +277,7 @@ def save_results_to_csv(results_list, output_path):
 
 
 def run_single_sample(filepath, output_dir):
-    """Process a single geometry file and save INDIVIDUAL result."""
+    """Load one geometry, run the full tensor simulation, and save results to CSV."""
     sample_name = Path(filepath).stem
     individual_csv = os.path.join(output_dir, f"result_{sample_name}.csv")
 
@@ -322,7 +332,7 @@ if __name__ == "__main__":
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Sorting ensures index 0 maps to the same file on every node
+    # Sort files so that each SLURM task index maps to the same file across nodes
     geometry_files = sorted(glob.glob(os.path.join(args.input_dir, "*.h5")))
     n_files = len(geometry_files)
 
@@ -330,7 +340,7 @@ if __name__ == "__main__":
         print(f"No .h5 files found in {args.input_dir}")
         exit(1)
 
-    # Process single sample by index (parallel mode)
+    # Process the single sample specified by the SLURM array task index
     if 0 <= args.sample_index < n_files:
         filepath = geometry_files[args.sample_index]
         success = run_single_sample(filepath, args.output_dir)

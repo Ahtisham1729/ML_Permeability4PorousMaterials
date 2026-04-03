@@ -41,43 +41,44 @@ def setup_logging(level: int = logging.INFO):
 # =============================================================================
 
 CONFIG = {
-    # Data (override via PERMEABILITY_DATA_PATH env var or --data CLI arg)
+    # --- Data paths and column definitions ---
     "data_path": os.environ.get("PERMEABILITY_DATA_PATH", "256-final.csv"),
-    "feature_cols": [
-        "a20", "a11", "a02", "a10", "a01", "a00",
-        "m", "porosity", "tortuosity_geometric_x", "tortuosity_geometric_y", "tortuosity_geometric_z"
+    "feature_cols": [                      # 11 input features for the forward model
+        "a20", "a11", "a02", "a10", "a01", "a00",   # Curvatubes shape parameters
+        "m", "porosity",                              # Material parameters
+        "tortuosity_geometric_x", "tortuosity_geometric_y", "tortuosity_geometric_z"  # Geometric tortuosity
     ],
-    "target_cols": ["K_xx", "K_yy", "K_zz"],
+    "target_cols": ["K_xx", "K_yy", "K_zz"],  # 3 diagonal permeability components
     "metadata_col": "sample_name",
 
-    # Split: 70/20/10
+    # --- Data splitting ---
     "train_frac": 0.70,
     "val_frac": 0.20,
     "test_frac": 0.10,
 
-    # Targets
-    "use_log_targets": True,
-    "k_floor": 1e-30,
+    # --- Target preprocessing ---
+    "use_log_targets": True,   # Apply log10 transform to permeability values
+    "k_floor": 1e-30,          # Floor value to avoid log(0)
 
-    # Preprocessing
+    # --- General settings ---
     "random_state": 42,
     "batch_size": 128,
 
-    # Model (defaults - can be overridden by tuned params)
+    # --- Forward model architecture (overridden by Optuna if tuning) ---
     "hidden_layers": [512, 512, 512, 512],
     "dropout_rate": 0.005,
 
-    # Training
+    # --- Training hyperparameters ---
     "max_epochs": 2500,
     "learning_rate": 1e-4,
-    "weight_decay": 1e-5,
-    "scheduler_factor": 0.5,
-    "scheduler_patience": 15,
-    "early_stop_patience": 100,
+    "weight_decay": 1e-5,           # L2 regularization for AdamW
+    "scheduler_factor": 0.5,        # LR reduction factor on plateau
+    "scheduler_patience": 15,       # Epochs to wait before reducing LR
+    "early_stop_patience": 100,     # Epochs without improvement before stopping
     "early_stop_min_delta": 1e-8,
-    "max_grad_norm": 1.0,
+    "max_grad_norm": 1.0,           # Gradient clipping threshold (0 = disabled)
 
-    # Optuna HPO settings (used by train_model.py --tune)
+    # --- Optuna HPO settings for forward model ---
     "optuna_trials": 50,
     "optuna_timeout_sec": None,
     "optuna_seed": 42,
@@ -85,14 +86,14 @@ CONFIG = {
     "optuna_startup_trials": 10,
     "optuna_warmup_steps": 10,
     "optuna_study_name": "permeability_mlp_hpo",
-    "optuna_db": None,
+    "optuna_db": None,              # SQLite/PostgreSQL URL for distributed HPO
 
-    # Tuning epoch budget (per trial)
+    # Epoch budget per HPO trial (shorter than full training)
     "tune_max_epochs": 400,
     "tune_early_stop_patience": 60,
     "tune_early_stop_min_delta": 1e-7,
 
-    # Output paths
+    # --- Output paths ---
     "output_dir": "forward_model_output",
     "optuna_results_csv": "optuna_trials.csv",
     "best_params_json": "optuna_best_params.json",
@@ -103,9 +104,7 @@ CONFIG = {
     "plot_path_test": "parity_test.png",
     "training_history_path": "training_history.png",
 
-    # -----------------------------------------------------------------
-    # Inverse Model — Optuna HPO settings
-    # -----------------------------------------------------------------
+    # --- Optuna HPO settings for inverse model ---
     "inverse_optuna_trials": 50,
     "inverse_optuna_timeout_sec": None,
     "inverse_optuna_seed": 42,
@@ -115,12 +114,10 @@ CONFIG = {
     "inverse_optuna_study_name": "inverse_mlp_hpo",
     "inverse_optuna_db": None,
 
-    # Tuning epoch budget (per trial)
     "inverse_tune_max_epochs": 400,
     "inverse_tune_early_stop_patience": 60,
     "inverse_tune_early_stop_min_delta": 1e-7,
 
-    # Output paths for inverse HPO
     "inverse_optuna_results_csv": "inverse_optuna_trials.csv",
     "inverse_best_params_json": "inverse_optuna_best_params.json",
 }
@@ -130,7 +127,7 @@ CONFIG = {
 # =============================================================================
 
 def set_seed(seed: int = 42):
-    """Set all random seeds for reproducibility."""
+    """Pin all random seeds (numpy, torch, CUDA) for reproducible results."""
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -143,8 +140,8 @@ def set_seed(seed: int = 42):
 
 def load_and_preprocess_data(config: dict) -> dict:
     """
-    Load CSV, optionally log-transform targets, split into train/val/test (70/20/10),
-    scale features and targets (fit scalers on TRAIN only), and return arrays + metadata.
+    Full data pipeline: load CSV, log-transform targets, split 70/20/10,
+    and fit MinMax scalers on training data only. Returns scaled arrays and scalers.
     """
     logger.info("=" * 60)
     logger.info("DATA LOADING & PREPROCESSING")
@@ -173,7 +170,7 @@ def load_and_preprocess_data(config: dict) -> dict:
     if not np.isfinite(Y).all():
         raise ValueError("Non-finite values in targets (NaN/Inf). Clean before training.")
 
-    # Model-space targets
+    # Transform targets to model space (log10 scale compresses the wide K range)
     if config["use_log_targets"]:
         k_floor = float(config.get("k_floor", 0.0))
         if (Y <= 0).any():
@@ -187,7 +184,7 @@ def load_and_preprocess_data(config: dict) -> dict:
         logger.info("Targets: raw K")
         logger.info("  Raw K range: [%s, %s]", f"{Y.min():.3e}", f"{Y.max():.3e}")
 
-    # 70/20/10 split via two-stage splitting
+    # Two-stage split: first separate train from (val+test), then split the remainder
     indices = np.arange(len(X))
     temp_frac = val_frac + test_frac
 
@@ -211,7 +208,7 @@ def load_and_preprocess_data(config: dict) -> dict:
 
     names_val, names_test = sample_names[val_idx], sample_names[test_idx]
 
-    # Fit scalers ONLY on train
+    # Fit scalers on training data only to prevent data leakage
     scaler_X = MinMaxScaler(feature_range=(0, 1))
     scaler_Y = MinMaxScaler(feature_range=(0, 1))
 
@@ -223,7 +220,7 @@ def load_and_preprocess_data(config: dict) -> dict:
     Y_val_s = scaler_Y.transform(Y_val_m)
     Y_test_s = scaler_Y.transform(Y_test_m)
 
-    # Store tensors for fast loader rebuilding
+    # Pre-convert to tensors so DataLoaders can be rebuilt quickly during HPO
     X_train_t = torch.from_numpy(X_train_s.astype(np.float32))
     Y_train_t = torch.from_numpy(Y_train_s.astype(np.float32))
     X_val_t = torch.from_numpy(X_val_s.astype(np.float32))
@@ -276,7 +273,7 @@ def make_loaders(data: dict, batch_size: int, seed: int = 42) -> dict:
 # =============================================================================
 
 class PermeabilityMLP(nn.Module):
-    """MLP regressor: [Linear→GELU→Dropout]×N → Linear."""
+    """Feedforward MLP: stacks of [Linear → GELU → Dropout], ending with a Linear output layer."""
     def __init__(self, n_inputs: int, n_outputs: int, hidden_layers: list[int], dropout_rate: float = 0.05):
         super().__init__()
         layers = []
@@ -289,7 +286,7 @@ class PermeabilityMLP(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        """Kaiming init."""
+        """Initialize weights using Kaiming normal for stable training with GELU."""
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
@@ -305,7 +302,7 @@ class PermeabilityMLP(nn.Module):
 # =============================================================================
 
 class EarlyStopping:
-    """Early stopping on validation loss; stores best weights."""
+    """Stop training when validation loss stops improving; keeps a copy of the best weights."""
     def __init__(self, patience: int, min_delta: float = 0.0):
         self.patience = patience
         self.min_delta = min_delta
@@ -333,7 +330,7 @@ class EarlyStopping:
 
 def train_one_epoch(model, loader, criterion, optimizer, device,
                     max_grad_norm: float = 0.0) -> float:
-    """Single training epoch. Applies gradient clipping if max_grad_norm > 0."""
+    """Run one pass over the training data, returning the average loss."""
     model.train()
     total, n = 0.0, 0
     for xb, yb in loader:
@@ -368,7 +365,7 @@ def validate(model, loader, criterion, device) -> float:
 # =============================================================================
 
 def save_scaler(scaler: MinMaxScaler) -> dict:
-    """Serialize a MinMaxScaler to a plain dict of numpy arrays."""
+    """Convert a fitted MinMaxScaler to a plain dict for safe serialization with torch.save."""
     return {
         "data_min_": scaler.data_min_.tolist(),
         "data_max_": scaler.data_max_.tolist(),
@@ -382,7 +379,7 @@ def save_scaler(scaler: MinMaxScaler) -> dict:
 
 
 def load_scaler(d: dict) -> MinMaxScaler:
-    """Reconstruct a MinMaxScaler from a plain dict."""
+    """Rebuild a MinMaxScaler from the dict saved by save_scaler()."""
     scaler = MinMaxScaler(feature_range=tuple(d["feature_range"]))
     scaler.data_min_ = np.array(d["data_min_"], dtype=np.float64)
     scaler.data_max_ = np.array(d["data_max_"], dtype=np.float64)
