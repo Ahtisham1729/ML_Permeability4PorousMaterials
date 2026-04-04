@@ -9,13 +9,12 @@ Inverse model (trained): K (3)         → features (11)
 
 Three loss modes (selectable via --loss_mode):
 
-  1. "geometry"  (default):
+  1. "geometry":
      L = α × L_fwd  +  β × L_geo
      L_fwd = ||FNN(Inv(K)) - K||²
      L_geo = ||Inv(K) - θ_true||²
-     → Eq. 23 from reference: forward consistency + geometry reconstruction
 
-  2. "bounding":
+  2. "bounding" (default):
      L = L_fwd  +  λ × L_bound
      L_bound penalises predictions outside [θ_min, θ_max] with zero penalty inside
      → Replaces geometry loss to avoid averaging artefact
@@ -186,7 +185,7 @@ INVERSE_CONFIG = {
     "max_grad_norm": 1.0,
 
     # --- Loss configuration ---
-    "loss_mode": "geometry",        # Options: "geometry", "bounding", "fwd_only"
+    "loss_mode": "bounding",        # Options: "geometry", "bounding", "fwd_only"
 
     # Geometry mode weights: L = w_fwd * L_fwd + w_param * L_geo
     "w_forward_consistency": 1.0,   # Weight for forward consistency term
