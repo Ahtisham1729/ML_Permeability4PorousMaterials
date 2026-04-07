@@ -4,6 +4,9 @@ Predict permeability tensors of porous materials from microstructure features us
 
 **Pipeline:** 3D porous geometry → LBM fluid simulation → dataset → forward neural network → inverse neural network
 
+## Report
+[View Report](./Khan_PPP.pdf)
+
 ## Repository Structure
 
 ```
